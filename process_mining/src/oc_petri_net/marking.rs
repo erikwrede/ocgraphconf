@@ -91,10 +91,7 @@ impl Marking {
     }
 
     /// Returns all possible firing combinations for the given transition.
-    pub fn get_firing_combinations(
-        &self,
-        transition: &Transition,
-    ) -> Vec<Binding> {
+    pub fn get_firing_combinations(&self, transition: &Transition) -> Vec<Binding> {
         let arcs_to_place: HashMap<Uuid, Vec<&InputArc>> =
             transition
                 .input_arcs
@@ -107,8 +104,11 @@ impl Marking {
                 });
 
         let default: HashBag<OCToken> = HashBag::new();
-        let mut input_place_map: HashMap<String, Vec<(&Uuid, HashBag<OCToken>, usize)>> =
+        let mut input_place_map: HashMap<String, Vec<(&Uuid, HashBag<OCToken>, usize, usize)>> =
             HashMap::new();
+
+        let mut var_arc_per_object_type: HashMap<String, usize> = HashMap::new();
+        let mut max_var_arcs_per_object_type: HashMap<String, usize> = HashMap::new();
 
         // Group input places by object_type along with their required token counts
         for (place_id, arcs) in arcs_to_place.iter() {
@@ -126,18 +126,42 @@ impl Marking {
                 return 0;
             });
 
+            let var_arc_count = arcs.iter().filter(|arc| arc.variable).count();
+
+            *var_arc_per_object_type.entry(obj_type.clone()).or_insert(0) += var_arc_count;
+
+            let max_var_arcs = max_var_arcs_per_object_type
+                .entry(obj_type.clone())
+                .or_insert(0);
+            if var_arc_count > *max_var_arcs {
+                *max_var_arcs = var_arc_count;
+            }
+
             input_place_map
                 .entry(obj_type)
                 .or_insert_with(Vec::new)
-                .push((place_id, filtered_bag, consuming_arc_count));
+                .push((place_id, filtered_bag, consuming_arc_count, var_arc_count));
         }
-        
+
         let mut obj_type_tokens: Vec<Vec<Vec<PlaceBindingInfo>>> = Vec::new();
 
         // For each object type, find tokens that satisfy all input places
         for (_obj_type, places) in input_place_map.iter() {
             let common_tokens =
-                intersect_hashbags(&*places.iter().map(|(_, bag, _)| bag).collect::<Vec<_>>());
+                intersect_hashbags(&*places.iter().map(|(_, bag, _, _)| bag).collect::<Vec<_>>());
+            
+            let var_arc_places_common_tokens = {
+                let var_arc_bags: Vec<HashBag<OCToken>> = places.iter()
+                    .filter(|(_, _, _, v_a_c)| *v_a_c > 0)
+                    .map(|(_, bag, req, var_arc_count)| {
+                        let mut cloned_bag = bag.clone();
+                        cloned_bag.retain(|_, count| count.saturating_sub(req - var_arc_count));
+                        cloned_bag
+                    })
+                    .collect();
+                let var_arc_bag_refs: Vec<&HashBag<OCToken>> = var_arc_bags.iter().collect();
+                intersect_hashbags(&var_arc_bag_refs)
+            };
 
             // If there are no common tokens, we can't fire the transition
             if (common_tokens.len() == 0) {
@@ -149,10 +173,17 @@ impl Marking {
             obj_type_tokens.push(
                 common_tokens
                     .set_iter()
-                    .map(|(token, _)| {
+                    .map(|(token, token_count)| {
+                        // per token, get the variable arc info
+                        let var_token_count = var_arc_places_common_tokens.contains(token);
+                        
+
                         places
                             .iter()
-                            .map(|(place_id, _, req)| {
+                            .map(|(place_id, _, req, var_arc_count)| {
+                                let var_possibilities =
+                                    token_count - (req - var_arc_count) / var_arc_count;
+                                for i in 1..var_possibilities {}
                                 (PlaceBindingInfo {
                                     consumed: req.clone(),
                                     token: token.clone(),
@@ -174,9 +205,10 @@ impl Marking {
 
         // Convert each product into a firing combination map
 
-        product.into_iter().map(|combination| {
-            Binding::from_combinations(transition.id, combination)
-        }).collect()
+        product
+            .into_iter()
+            .map(|combination| Binding::from_combinations(transition.id, combination))
+            .collect()
     }
 
     /// Checks if the transition is enabled by verifying if there is at least one firing combination.
@@ -195,7 +227,7 @@ impl Marking {
 }
 
 impl Binding {
-    fn from_combinations(transition_id: Uuid, combinations: Vec<Vec<PlaceBindingInfo>>) -> Self { 
+    fn from_combinations(transition_id: Uuid, combinations: Vec<Vec<PlaceBindingInfo>>) -> Self {
         Binding {
             tokens: combinations
                 .iter()
@@ -220,9 +252,10 @@ struct Binding {
     /// Tokens to take out of the place
     pub tokens: HashMap<Uuid, PlaceBindingInfo>,
     pub transition_id: Uuid,
+    pub var_arc_counts: HashMap<String, usize>,
 }
 
-fn cartesian_product<'a, T>(inputs: Vec<Vec<&'a T>>) -> Vec<Vec<&'a T>> {
+fn cartesian_product<T>(inputs: Vec<Vec<&T>>) -> Vec<Vec<&T>> {
     inputs.into_iter().fold(vec![Vec::new()], |acc, pool| {
         acc.into_iter()
             .flat_map(|combination| {
