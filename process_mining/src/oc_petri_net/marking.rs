@@ -1,7 +1,7 @@
 use crate::oc_petri_net::oc_petri_net::{InputArc, ObjectCentricPetriNet, Transition};
 use crate::oc_petri_net::util::intersect_hashbag::intersect_hashbags;
 use hashbag::HashBag;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -107,18 +107,37 @@ impl Marking {
                 });
 
         let default: HashBag<OCToken> = HashBag::new();
-        let mut input_place_map: HashMap<String, Vec<(&Uuid, HashBag<OCToken>, usize, usize)>> =
+        let mut input_place_map: HashMap<String, Vec<(&Uuid, HashBag<OCToken>, usize)>> =
             HashMap::new();
 
-        let mut max_var_arcs_per_object_type: HashMap<String, usize> = HashMap::new();
-        let mut max_non_var_arcs_on_var_arc_place_per_object_type: HashMap<String, usize> =
-            HashMap::new();
+        let mut object_type_variable: HashMap<String, bool> = HashMap::new();
+
         // Group input places by object_type along with their required token counts
         for (place_id, arcs) in arcs_to_place.iter() {
             let place = self.petri_net.get_place(place_id).expect("Place not found");
             let obj_type = place.object_type.clone();
             let consuming_arc_count = arcs.len();
             let bag = self.assignments.get(place_id).unwrap_or(&default);
+
+            // all arcs to place must either be variable or non-variable
+            // if this is not the case, panic
+            let var_arc_count = arcs.iter().filter(|arc| arc.variable).count();
+            let non_var_arc_count = consuming_arc_count - var_arc_count;
+
+            let is_variable = var_arc_count > 0;
+
+            if is_variable && non_var_arc_count > 0 {
+                panic!("Petri-Net isn't well-formed! All arcs to a place must either be variable or non-variable");
+            }
+
+            // now insert the object type and if it is variable into the map, panic if that is incompatible with existing info in the map
+            if let Some(&is_var) = object_type_variable.get(&obj_type) {
+                if is_var != (is_variable) {
+                    panic!("Petri-Net isn't well-formed! All arcs to a place must either be variable or non-variable");
+                }
+            } else {
+                object_type_variable.insert(obj_type.clone(), is_variable);
+            }
 
             // Filter the bag to retain only tokens with a count >= consuming_arc_count
             let mut filtered_bag = bag.clone();
@@ -129,130 +148,65 @@ impl Marking {
                 return 0;
             });
 
-            let var_arc_count = arcs.iter().filter(|arc| arc.variable).count();
-            let non_var_arc_count = consuming_arc_count - var_arc_count;
-
-            let max_var_arcs = max_var_arcs_per_object_type
-                .entry(obj_type.clone())
-                .or_insert(0);
-
-            if var_arc_count > *max_var_arcs {
-                *max_var_arcs = var_arc_count;
-            }
-
-            if (var_arc_count > 0) {
-                let max_non_var_arcs = max_non_var_arcs_on_var_arc_place_per_object_type
-                    .entry(obj_type.clone())
-                    .or_insert(0);
-
-                if non_var_arc_count > *max_non_var_arcs {
-                    *max_non_var_arcs = non_var_arc_count;
-                }
-            }
-
             input_place_map
                 .entry(obj_type)
                 .or_insert_with(Vec::new)
-                .push((place_id, filtered_bag, consuming_arc_count, var_arc_count));
+                .push((place_id, filtered_bag, consuming_arc_count));
         }
         // One for obj_type, one for place, one for all variable arc combinations
-        let mut obj_type_tokens: Vec<Vec<Vec<PlaceBindingInfo>>> = Vec::new();
+        let mut obj_type_tokens: Vec<Vec<ObjectBindingInfo>> = Vec::new();
 
         // For each object type, find tokens that satisfy all input places
         for (_obj_type, places) in input_place_map.iter() {
             let common_tokens =
-                intersect_hashbags(&*places.iter().map(|(_, bag, _, _)| bag).collect::<Vec<_>>());
-
-            let var_arc_places_common_tokens = {
-                let var_arc_bags: Vec<HashBag<OCToken>> = places
-                    .iter()
-                    // Filter for places with at least one variable arc
-                    .filter(|(_, _, _, v_a_c)| *v_a_c > 0)
-                    // Do this later, as we only know which tokens to subtract when we select the token for firing
-                    /*.map(|(_, bag, req, var_arc_count)| {
-                        let mut cloned_bag = bag.clone();
-                        // FIXME check correctness!! subtract var arc count from req
-                        // i think this should be consuming_arc_count
-                        cloned_bag.retain(|_, count| count.saturating_sub(req - var_arc_count));
-                        cloned_bag
-                    })*/
-                    .map(|(_, bag, _, _)| bag.clone())
-                    .collect();
-                let var_arc_bag_refs: Vec<&HashBag<OCToken>> = var_arc_bags.iter().collect();
-                intersect_hashbags(&var_arc_bag_refs)
-            };
+                intersect_hashbags(&*places.iter().map(|(_, bag, _)| bag).collect::<Vec<_>>());
 
             // If there are no common tokens, we can't fire the transition
             if (common_tokens.len() == 0) {
                 return vec![];
             }
 
-            let firings = common_tokens
-                .set_iter()
-                .map(|(token, token_count)| {
-                    // per token, get the variable arc info
-                    let max_non_var_arcs = max_non_var_arcs_on_var_arc_place_per_object_type
-                        .get(_obj_type)
-                        .unwrap_or(&0);
-                    let max_var_arcs = max_var_arcs_per_object_type.get(_obj_type).unwrap_or(&0);
-
-                    // now, given the maximum number of arcs consuming tokens from a place connected via variable arcs
-                    // we can subtract this number from the available tokens of the selected token id for each place
-
-                    let mut intermediate_var_bag = var_arc_places_common_tokens.clone();
-                    intermediate_var_bag.remove_up_to(token, max_non_var_arcs.clone());
-
-                    // then, given the maximum number of variable arcs on a place, we can divide the available tokens by this number
-                    // to get the number of possible combinations
-                    // make sure the division is floored
-                    intermediate_var_bag.retain(|_, count| count / max_var_arcs);
-                    let var_arc_firing_combinations = power_multiset(&intermediate_var_bag);
-                    // now, for any arbitrary token multiset from the intermediate bag plus the selected common token, we can build a place binding info and the
-                    places
-                        .iter()
-                        .map(|(place_id, _, req, var_arc_count)| {
-                            if (*var_arc_count == 0) {
-                                let mut token_bag = HashBag::new();
-                                token_bag.insert_many(token.clone(), *req);
-
-                                let mut list_size = var_arc_firing_combinations.len();
-                                if (list_size == 0) {
-                                    list_size = 1;
-                                }
-
-                                let mut list = Vec::with_capacity(list_size);
-                                for i in 0..list_size {
-                                    list.push(PlaceBindingInfo {
-                                        consumed: token_bag.clone(),
-                                        place_id: *place_id.clone(),
-                                    });
-                                }
-                                return list;
-                            }
-                            let result = var_arc_firing_combinations
+            let firings = {
+                //Normal places
+                if !object_type_variable.get(_obj_type).unwrap() {
+                    common_tokens
+                        .set_iter()
+                        .map(|(token, token_count)| ObjectBindingInfo {
+                            object_type: _obj_type.clone(),
+                            tokens: vec![token.clone()],
+                            place_bindings: places
                                 .iter()
-                                .map(|combination| {
-                                    let mut token_bag = HashBag::new();
-
-                                    // we are not taking the var arcs like this
-                                    token_bag.insert_many(token.clone(), *req - var_arc_count);
-
-                                    combination.set_iter().for_each(|(token, count)| {
-                                        token_bag.insert_many(token.clone(), count);
-                                    });
-
-                                    return PlaceBindingInfo {
-                                        consumed: token_bag,
-                                        place_id: *place_id.clone(),
-                                    };
+                                .map(|(place_id, _, consuming_arc_count)| PlaceBinding {
+                                    count: *consuming_arc_count,
+                                    consumed: vec![token.clone(); *consuming_arc_count],
+                                    place_id: *place_id.clone(),
                                 })
-                                .collect();
-
-                            result
+                                .collect(),
                         })
                         .collect()
-                })
-                .collect();
+                } else {
+                    //Variable places
+                    // compute possible combinations of tokens for the variable arc to take, at least one token must be taken
+                    let mut power_sets = power_set(&common_tokens);
+                    power_sets.swap_remove(0);
+
+                    power_sets
+                        .into_iter()
+                        .map(|token_set| ObjectBindingInfo {
+                            object_type: _obj_type.clone(),
+                            tokens: token_set.iter().map(|token| token.clone()).collect(),
+                            place_bindings: places
+                                .iter()
+                                .map(|(place_id, _, consuming_arc_count)| PlaceBinding {
+                                    count: *consuming_arc_count,
+                                    consumed: token_set.iter().map(|token| token.clone()).collect(),
+                                    place_id: *place_id.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect()
+                }
+            };
             obj_type_tokens.push(firings);
         }
 
@@ -271,6 +225,34 @@ impl Marking {
             .collect()
     }
 
+    pub fn fire_transition(&mut self, transition: &Transition, binding: Binding) {
+        for obj_binding in binding.object_binding_info.values() {
+            // Remove Tokens from input places
+            for place_binding in obj_binding.place_bindings.iter() {
+                let bag = self
+                    .assignments
+                    .get_mut(&place_binding.place_id)
+                    .expect("Place not found");
+                for token in place_binding.consumed.iter() {
+                    // TODO make clear this will not panic if the token is not found or not enough tokens are found
+                    bag.remove_up_to(&token, place_binding.count);
+                }
+            }
+        }
+        // Add tokens to output places
+        for arc in transition.output_arcs.iter() {
+            let bag = self
+                .assignments
+                .entry(arc.target_place_id)
+                .or_insert_with(|| HashBag::new());
+            for obj_binding in binding.object_binding_info.values() {
+                for token in obj_binding.tokens.iter() {
+                    bag.insert(token.clone());
+                }
+            }
+        }
+    }
+
     /// Checks if the transition is enabled by verifying if there is at least one firing combination.
     pub fn is_enabled(&self, transition: &Transition) -> bool {
         !self.get_firing_combinations(transition).is_empty()
@@ -284,36 +266,35 @@ impl Marking {
 }
 
 impl Binding {
-    fn from_combinations(
-        transition_id: Uuid,
-        combinations: Vec<Vec<PlaceBindingInfo>>,
-        var_arc_counts: Vec,
-    ) -> Self {
+    fn from_combinations(transition_id: Uuid, combinations: Vec<ObjectBindingInfo>) -> Self {
         Binding {
-            tokens: combinations
+            object_binding_info: combinations
                 .iter()
-                .fold(HashMap::new(), |mut acc, bindings| {
-                    bindings.into_iter().for_each(|binding| {
-                        acc.insert(binding.place_id, binding.clone()); // fixme clone
-                    });
-                    acc
-                }),
+                .map(|c| (c.object_type.clone(), c.clone()))
+                .collect(),
             transition_id,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct PlaceBindingInfo {
+struct PlaceBinding {
     pub place_id: Uuid,
-    pub consumed: HashBag<OCToken>,
+    pub consumed: Vec<OCToken>,
+    pub count: usize,
 }
+
+#[derive(Debug, Clone)]
+struct ObjectBindingInfo {
+    pub object_type: String,
+    pub tokens: Vec<OCToken>,
+    pub place_bindings: Vec<PlaceBinding>,
+}
+
 struct Binding {
     /// Tokens to take out of the place
-    pub tokens: HashMap<Uuid, PlaceBindingInfo>,
     pub transition_id: Uuid,
-    /// Var arc counts for each object type
-    pub var_arc_token_sets: HashMap<String, HashBag<OCToken>>,
+    pub object_binding_info: HashMap<String, ObjectBindingInfo>,
 }
 
 fn cartesian_product<T>(inputs: Vec<Vec<&T>>) -> Vec<Vec<&T>> {
@@ -367,4 +348,23 @@ fn power_multiset<T: Clone + std::hash::Hash + Eq>(bag: &HashBag<T>) -> Vec<Hash
     power_multisets.swap_remove(0);
 
     power_multisets
+}
+
+fn power_set<T: Clone + std::hash::Hash + Eq>(bag: &HashBag<T>) -> Vec<HashSet<T>> {
+    let unique_items: Vec<T> = bag.set_iter().map(|(item, _)| item.clone()).collect();
+    let num_subsets = 1 << unique_items.len(); // 2^n subsets
+
+    let mut power_sets = Vec::with_capacity(num_subsets);
+
+    for i in 0..num_subsets {
+        let mut subset = HashSet::new();
+        for (j, item) in unique_items.iter().enumerate() {
+            if (i & (1 << j)) != 0 {
+                subset.insert(item.clone());
+            }
+        }
+        power_sets.push(subset);
+    }
+
+    power_sets
 }
