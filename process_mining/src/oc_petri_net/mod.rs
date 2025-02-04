@@ -1,3 +1,3 @@
 pub mod oc_petri_net;
-mod marking;
+pub mod marking;
 mod util;

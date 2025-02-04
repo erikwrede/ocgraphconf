@@ -225,7 +225,7 @@ impl Marking {
             .collect()
     }
 
-    pub fn fire_transition(&mut self, transition: &Transition, binding: Binding) {
+    pub fn fire_transition(&mut self, transition: &Transition, binding: &Binding) {
         for obj_binding in binding.object_binding_info.values() {
             // Remove Tokens from input places
             for place_binding in obj_binding.place_bindings.iter() {
@@ -278,20 +278,20 @@ impl Binding {
 }
 
 #[derive(Debug, Clone)]
-struct PlaceBinding {
+pub struct PlaceBinding {
     pub place_id: Uuid,
     pub consumed: Vec<OCToken>,
     pub count: usize,
 }
 
 #[derive(Debug, Clone)]
-struct ObjectBindingInfo {
+pub struct ObjectBindingInfo {
     pub object_type: String,
     pub tokens: Vec<OCToken>,
     pub place_bindings: Vec<PlaceBinding>,
 }
 
-struct Binding {
+pub struct Binding {
     /// Tokens to take out of the place
     pub transition_id: Uuid,
     pub object_binding_info: HashMap<String, ObjectBindingInfo>,
