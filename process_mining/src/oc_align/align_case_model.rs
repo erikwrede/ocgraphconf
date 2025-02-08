@@ -46,7 +46,9 @@ impl ModelCaseChecker {
         query_case: &'a CaseGraph,
         initial_marking: Marking,
     ) -> Option<SearchNode> {
-        let mut global_upper_bound = f64::INFINITY;
+        println!("starting");
+        //let mut global_upper_bound = f64::INFINITY;
+        let mut global_upper_bound = 50.0;
         let mut global_lower_bound = 0.0;
         let mut best_node: Option<SearchNode> = None;
 
@@ -56,8 +58,10 @@ impl ModelCaseChecker {
             0.0,
             None,
         )];
+        println!("starting");
 
         while let Some(mut current_node) = open_list.pop() {
+            println!("Number of open nodes: {}", open_list.len());
             if current_node.min_cost >= global_upper_bound {
                 continue;
             }
@@ -68,7 +72,7 @@ impl ModelCaseChecker {
 
             let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
 
-            if current_node.marking.is_final() {
+            if current_node.marking.is_final_has_tokens() {
                 // Limit the scope of the mutable borrow using a separate block
                 if alignment_cost < global_upper_bound {
                     // log that new best bound has been found
@@ -197,6 +201,8 @@ impl ModelCaseChecker {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use crate::oc_petri_net::initialize_ocpn_from_json;
     use super::*;
 
     #[test]
@@ -251,6 +257,39 @@ mod tests {
         // Print the results for debugging
         println!("Best alignment cost: {}", total_cost);
         //best_node.partial_case.print_mappings();
+    }
+
+    #[test]
+    fn large_petri_net() {
+
+        let json_data = fs::read_to_string("./src/oc_petri_net/util/oc_petri_net.json").unwrap();
+        let ocpn = initialize_ocpn_from_json(&json_data);
+
+        let initial_marking = Marking::new(ocpn.clone());
+        // Wrap the petri net in Arc to match branch_and_bound signature
+        let petri_net_arc = Arc::new(ocpn);
+
+        // Create a CaseGraph representing the query case
+        let mut query_case = CaseGraph::new();
+
+        // Add nodes corresponding to the events in the query case
+        let event1 = Node::Event(Event { id: 1, event_type: "A".to_string() });
+
+        query_case.add_node(event1);
+
+        // Initialize ModelCaseChecker
+        let mut checker = ModelCaseChecker::new();
+
+        // Use branch_and_bound to find alignment
+        let result = checker.branch_and_bound(petri_net_arc, &query_case, initial_marking);
+
+        // Validate if a result is found
+        assert!(result.is_some(), "Failed to find a valid alignment");
+
+        let best_node = result.unwrap();
+        let total_cost = best_node.min_cost;
+
+
     }
 
     #[test]

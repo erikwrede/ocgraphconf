@@ -263,6 +263,13 @@ impl Marking {
             tokens.is_empty() || self.petri_net.get_place(place_id).unwrap().final_place
         })
     }
+
+    pub fn is_final_has_tokens(&self) -> bool {
+        let has_tokens = self.assignments.values().any(|tokens| !tokens.is_empty());
+        has_tokens && self.assignments.iter().all(|(place_id, tokens)| {
+            tokens.is_empty() || self.petri_net.get_place(place_id).unwrap().final_place
+        })
+    }
 }
 
 impl Binding {
