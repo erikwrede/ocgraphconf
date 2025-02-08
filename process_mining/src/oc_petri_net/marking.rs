@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
+use crate::oc_align::util::reachability_cache::ReachabilityCache;
+
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -269,6 +271,74 @@ impl Marking {
         has_tokens && self.assignments.iter().all(|(place_id, tokens)| {
             tokens.is_empty() || self.petri_net.get_place(place_id).unwrap().final_place
         })
+    }
+
+    pub fn has_dead_places(
+        &self,
+        transition_enabled: &HashMap<Uuid, bool>,
+        reachability_cache: &ReachabilityCache,
+    ) -> Vec<Uuid> {
+        let mut dead_places = Vec::new();
+
+        // Collect all places that have tokens in the current marking
+        let places_with_tokens: Vec<Uuid> = self
+            .assignments
+            .iter()
+            .filter(|(_, bag)| !bag.is_empty())
+            .filter(|(place_id, _)| {
+                let place = self.petri_net.get_place(place_id).unwrap();
+                !place.final_place
+            })
+            .map(|(place_id, _)| *place_id)
+            .collect();
+
+        // Iterate through all places with tokens to find dead places
+        for &place_id in &places_with_tokens {
+            let place = match self.petri_net.get_place(&place_id) {
+                Some(p) => p,
+                None => panic!("Place with ID {:?} does not exist in the Petri net.", place_id),
+            };
+
+            // Skip if the place is final
+            if place.final_place {
+                continue;
+            }
+
+            // Check if any transition away from this place is enabled
+            let mut has_enabled_transition = false;
+
+            for arc in &place.output_arcs {
+                let transition_id = arc.target_transition_id;
+                if let Some(&is_enabled) = transition_enabled.get(&transition_id) {
+                    if is_enabled {
+                        has_enabled_transition = true;
+                        break;
+                    }
+                }
+            }
+
+            // If there's at least one enabled transition, it's not a dead place
+            if has_enabled_transition {
+                continue;
+            }
+
+            // Now, verify that the dead place is not reachable from any other place with tokens
+            let is_reachable = places_with_tokens.iter().any(|&other_place_id| {
+                if other_place_id == place_id {
+                    // Skip the same place
+                    false
+                } else {
+                    reachability_cache.is_reachable(&other_place_id, &place_id)
+                }
+            });
+
+            // If the place is not reachable from any other place with tokens, it's a dead place
+            if !is_reachable {
+                dead_places.push(place.id.clone());
+            }
+        }
+
+        dead_places
     }
 }
 

@@ -283,14 +283,14 @@ impl<'a> CaseAlignment<'a> {
         let solved_model = model.solve();
 
         let status = solved_model.status();
-        println!("Solved with status {:?}", status);
+        //println!("Solved with status {:?}", status);
 
         if solved_model.status() != Status::Optimal {
             panic!("No optimal solution found");
         }
 
         let obj_val = solved_model.obj_val();
-        println!("Objective value: {}", obj_val);
+        //println!("Objective value: {}", obj_val);
 
         let sol = solved_model.best_sol().unwrap();
 
