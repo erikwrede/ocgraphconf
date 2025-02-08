@@ -80,7 +80,7 @@ impl SearchNodeAction {
         }
     }
 
-    fn log(&self, object_centric_petri_net: &ObjectCentricPetriNet) {
+    fn log(&self, object_centric_petri_net: Arc<ObjectCentricPetriNet>) {
         match self {
             SearchNodeAction::FireTransition(transition_id, binding) => {
                 println!(
@@ -157,7 +157,7 @@ impl ModelCaseChecker {
             open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
             //current_node.partial_case_stats.pretty_print_stats();
             //println!("Solving node with min cost: {}", current_node.min_cost);
-            //current_node.action.log(&model);
+            current_node.action.log(self.model.clone());
             // print all the keys in a single line
             let events = current_node.partial_case_stats.query_event_counts.keys();
             //println!("Events: {:?}", events);
@@ -181,13 +181,12 @@ impl ModelCaseChecker {
 
                     global_upper_bound = alignment_cost;
                     best_node = Some(current_node.clone());
-                    open_list
+                    let len = open_list
                         .iter()
                         .filter(|node| node.min_cost >= global_upper_bound)
-                        .for_each(|node| {
-                            // log that node has been pruned
-                            //println!("Pruned node with cost: {}", node.min_cost);
-                        });
+                        .count();
+                    
+                    println!("Number of nodes pruned due to best bound: {}", len);
 
                     // remove all nodes that have a cost higher than the new upper bound
                     open_list.retain(|node| node.min_cost < global_upper_bound);

@@ -272,7 +272,6 @@ impl Marking {
             tokens.is_empty() || self.petri_net.get_place(place_id).unwrap().final_place
         })
     }
-
     pub fn has_dead_places(
         &self,
         transition_enabled: &HashMap<Uuid, bool>,
@@ -280,7 +279,7 @@ impl Marking {
     ) -> Vec<Uuid> {
         let mut dead_places = Vec::new();
 
-        // Collect all places that have tokens in the current marking
+        // Collect all non-final places that have tokens in the current marking
         let places_with_tokens: Vec<Uuid> = self
             .assignments
             .iter()
@@ -292,14 +291,14 @@ impl Marking {
             .map(|(place_id, _)| *place_id)
             .collect();
 
-        // Iterate through all places with tokens to find dead places
+        // Iterate through all candidate dead places
         for &place_id in &places_with_tokens {
             let place = match self.petri_net.get_place(&place_id) {
                 Some(p) => p,
                 None => panic!("Place with ID {:?} does not exist in the Petri net.", place_id),
             };
 
-            // Skip if the place is final
+            // Already filtered out final places, but double-check
             if place.final_place {
                 continue;
             }
@@ -322,7 +321,12 @@ impl Marking {
                 continue;
             }
 
-            // Now, verify that the dead place is not reachable from any other place with tokens
+            // Now, verify two conditions:
+            // 1. The dead place is not reachable from any other place with tokens.
+            // 2. The transitions connected to the dead place cannot be enabled by adding tokens
+            //    to other input places from reachable token-holding places.
+
+            // Condition 1: Check if the dead place is reachable from any other place with tokens
             let is_reachable = places_with_tokens.iter().any(|&other_place_id| {
                 if other_place_id == place_id {
                     // Skip the same place
@@ -332,9 +336,61 @@ impl Marking {
                 }
             });
 
-            // If the place is not reachable from any other place with tokens, it's a dead place
-            if !is_reachable {
-                dead_places.push(place.id.clone());
+            // If the place is reachable from another place with tokens, it might not be dead
+            if is_reachable {
+                continue;
+            }
+
+            // Condition 2: For each transition connected to the dead place, ensure it cannot be
+            // enabled by adding tokens to other input places.
+            let mut can_enable_transition = false;
+
+            for arc in &place.output_arcs {
+                let transition_id = arc.target_transition_id;
+                let transition = match self.petri_net.get_transition(&transition_id) {
+                    Some(t) => t,
+                    None => continue, // Transition does not exist, skip
+                };
+
+                // Collect all input places for this transition excluding the dead place
+                let other_input_places: Vec<Uuid> = transition
+                    .input_arcs
+                    .iter()
+                    .filter_map(|input_arc| {
+                        if input_arc.source_place_id != place_id {
+                            Some(input_arc.source_place_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // If there are no other input places, the transition cannot be enabled without the dead place
+                if other_input_places.is_empty() {
+                    continue;
+                }
+
+                // Check if all other input places are unreachable, meaning tokens cannot be added
+                // to them from the current marking.
+                let other_inputs_reachable = other_input_places.iter().any(|&input_id| {
+                    // A place can have tokens added if it's reachable from any current token-holding place
+                    self.assignments.iter().any(|(current_place_id, _)| {
+                        // Skip the dead place itself
+                        current_place_id != &place_id
+                            && reachability_cache.is_reachable(current_place_id, &input_id)
+                    })
+                });
+                
+                // If at least one other input place is reachable, the transition can potentially be enabled
+                if other_inputs_reachable {
+                    can_enable_transition = true;
+                    break; // No need to check other transitions, place is not dead
+                }
+            }
+
+            // If none of the connected transitions can be enabled via other input places, it's dead
+            if !can_enable_transition {
+                dead_places.push(place_id.clone());
             }
         }
 
