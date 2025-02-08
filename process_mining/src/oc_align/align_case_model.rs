@@ -83,13 +83,24 @@ impl SearchNodeAction {
     fn log(&self, object_centric_petri_net: Arc<ObjectCentricPetriNet>) {
         match self {
             SearchNodeAction::FireTransition(transition_id, binding) => {
+                // map objectbindinginfo to object names, token count
+                let object_names: Vec<String> = binding
+                    .object_binding_info
+                    .values()
+                    .map(|binding_info| {
+                        let object_name = binding_info.object_type.clone();
+                        let token_count = binding_info.tokens.len();
+                        format!("{}: {}", object_name, token_count)
+                    })
+                    .collect();
+                
                 println!(
                     "Firing transition: {} with binding: {:?}",
                     object_centric_petri_net
                         .get_transition(transition_id)
                         .unwrap()
                         .name,
-                    binding
+                    object_names
                 );
             }
             SearchNodeAction::AddToken(object_id) => {
@@ -131,7 +142,7 @@ impl ModelCaseChecker {
     ) -> Option<SearchNode> {
         //println!("starting");
         //let mut global_upper_bound = f64::INFINITY;
-        let mut global_upper_bound = 50.0;
+        let mut global_upper_bound = 5000.0;
         let mut global_lower_bound = 0.0;
         let mut best_node: Option<SearchNode> = None;
 
