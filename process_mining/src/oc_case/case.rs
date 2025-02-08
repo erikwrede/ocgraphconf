@@ -81,6 +81,29 @@ impl Edge {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CaseStats {
+    pub query_event_counts: HashMap<String, usize>,
+    pub query_object_counts: HashMap<String, usize>,
+    pub query_edge_counts: HashMap<EdgeType, usize>,
+}
+
+impl CaseStats {
+    pub fn pretty_print_stats(&self) {
+        println!("Event counts:");
+        for (event_type, count) in &self.query_event_counts {
+            println!("{}: {}", event_type, count);
+        }
+        println!("Object counts:");
+        for (object_type, count) in &self.query_object_counts {
+            println!("{}: {}", object_type, count);
+        }
+        println!("Edge counts:");
+        for (edge_type, count) in &self.query_edge_counts {
+            println!("{:?}: {}", edge_type, count);
+        }
+    }
+}
 // Define the CaseGraph structure
 #[derive(Debug, Clone)]
 pub struct CaseGraph {
@@ -145,6 +168,40 @@ impl CaseGraph {
                 })
                 .collect(),
             None => Vec::new(),
+        }
+    }
+
+    pub fn count_nodes_by_type(&self) -> (HashMap<String, usize>, HashMap<String, usize>) {
+        let mut event_counts = HashMap::new();
+        let mut object_counts = HashMap::new();
+        for node in self.nodes.values() {
+            match node {
+                Node::Event(event) => {
+                    *event_counts.entry(event.event_type.clone()).or_insert(0) += 1;
+                }
+                Node::Object(object) => {
+                    *object_counts.entry(object.object_type.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        (event_counts, object_counts)
+    }
+
+    pub fn count_edges_by_type(&self) -> HashMap<EdgeType, usize> {
+        let mut edge_counts = HashMap::new();
+        for edge in self.edges.values() {
+            *edge_counts.entry(edge.edge_type).or_insert(0) += 1;
+        }
+        edge_counts
+    }
+    
+    pub fn get_case_stats(&self) -> CaseStats {
+        let (query_event_counts, query_object_counts) = self.count_nodes_by_type();
+        let query_edge_counts = self.count_edges_by_type();
+        CaseStats {
+            query_event_counts,
+            query_object_counts,
+            query_edge_counts,
         }
     }
 }

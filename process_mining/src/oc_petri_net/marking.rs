@@ -298,6 +298,7 @@ pub struct ObjectBindingInfo {
     pub place_bindings: Vec<PlaceBinding>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Binding {
     /// Tokens to take out of the place
     pub transition_id: Uuid,

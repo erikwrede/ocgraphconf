@@ -44,7 +44,7 @@ pub fn initialize_ocpn_from_json(json_data: &str) -> ObjectCentricPetriNet {
                 .map(|s| s.to_string());
             let silent = transition.get("silent").and_then(|v| v.as_bool()).unwrap();
 
-            let transition_instance = ocpn.add_transition(name, label, silent);
+            let transition_instance = ocpn.add_transition(label.clone().unwrap(), label, silent);
             id_to_transition.insert(id, transition_instance);
         }
     }
