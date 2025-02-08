@@ -169,7 +169,7 @@ impl ModelCaseChecker {
                 // now output a lot of info such as a string repr of the current case we found and the cost etc
                 print!("Final marking reached");
                 print!("Cost: {}", alignment_cost);
-                panic!("Final marking reached");
+                //panic!("Final marking reached");
 
                 // Limit the scope of the mutable borrow using a separate block
                 if alignment_cost < global_upper_bound {
@@ -185,6 +185,9 @@ impl ModelCaseChecker {
                             // log that node has been pruned
                             println!("Pruned node with cost: {}", node.min_cost);
                         });
+                    
+                    // remove all nodes that have a cost higher than the new upper bound
+                    open_list.retain(|node| node.min_cost < global_upper_bound);
                 }
             }
 
