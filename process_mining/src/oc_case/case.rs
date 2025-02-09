@@ -1,6 +1,8 @@
 use crate::id_based_impls;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::AtomicUsize;
+use serde::{Deserialize, Serialize};
 
 // Define the Event struct
 #[derive(Debug, Clone)]
@@ -49,7 +51,7 @@ impl Hash for Node {
 }
 
 // Define the EdgeType enum
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeType {
     DF,  // Event to Event
     O2O, // Object to Object
@@ -109,8 +111,8 @@ impl CaseStats {
 pub struct CaseGraph {
     pub nodes: HashMap<usize, Node>,       // Keyed by node ID
     pub edges: HashMap<usize, Edge>,       // Keyed by edge ID
-    adjacency: HashMap<usize, Vec<usize>>, // from node ID -> Vec of edge IDs
-    id_to_index: HashMap<usize, usize>,    // Map from node ID to index (if needed)
+    pub(crate) adjacency: HashMap<usize, Vec<usize>>, // from node ID -> Vec of edge IDs
+    pub(crate) counter: usize,
 }
 
 impl CaseGraph {
@@ -119,14 +121,17 @@ impl CaseGraph {
             nodes: HashMap::new(),
             edges: HashMap::new(),
             adjacency: HashMap::new(),
-            id_to_index: HashMap::new(),
+            counter: 0,
         }
     }
-
+    pub fn get_new_id(&mut self) -> usize {
+        self.counter += 1;
+        self.counter
+    }
+    
     // Add a node to the graph
     pub fn add_node(&mut self, node: Node) {
         let id = node.id();
-        self.id_to_index.insert(id, self.nodes.len());
         self.nodes.insert(id, node);
     }
 
