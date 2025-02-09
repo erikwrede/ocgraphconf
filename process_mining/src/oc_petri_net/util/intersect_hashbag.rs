@@ -68,6 +68,10 @@ where
     T: Clone + Eq + Hash,
     S: BuildHasher + Clone
 {
+    if(bags.len() == 1) {
+        return bags[0].clone();
+    }
+    
     // Find the bag with the smallest set_len to minimize iterations
     let smallest_bag = bags
         .iter()
