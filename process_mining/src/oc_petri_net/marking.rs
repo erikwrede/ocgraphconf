@@ -160,15 +160,18 @@ impl Marking {
 
         // For each object type, find tokens that satisfy all input places
         for (_obj_type, places) in input_place_map.iter() {
-            // if (transition.name == "send package") {
+            if (transition.name == "place order") {
             //     println!("-------------------");
             //     println!("transition: {}", transition.name);
-            //     println!("obj_type: {}", _obj_type);
-            //     println!("places: {:?}", places);
+                 println!("obj_type: {}", _obj_type);
+                 println!("places: {:?}", places);
             //     println!("-------------------");
-            // }
+            }
             let common_tokens =
                 intersect_hashbags(&*places.iter().map(|(_, bag, _)| bag).collect::<Vec<_>>());
+            if (transition.name == "place order") {
+                println!("intersected bags")
+            }
 
             // If there are no common tokens, we can't fire the transition
             if (common_tokens.len() == 0) {
@@ -196,8 +199,15 @@ impl Marking {
                 } else {
                     //Variable places
                     // compute possible combinations of tokens for the variable arc to take, at least one token must be taken
+
+                    if (transition.name == "place order") {
+                        println!("power set start")
+                    }
                     let mut power_sets = power_set(&common_tokens);
                     power_sets.swap_remove(0);
+                    if (transition.name == "place order") {
+                        println!("power set end")
+                    }
 
                     power_sets
                         .into_iter()
@@ -216,6 +226,10 @@ impl Marking {
                         .collect()
                 }
             };
+
+            if (transition.name == "place order") {
+                println!("firings")
+            }
             obj_type_tokens.push(firings);
         }
 

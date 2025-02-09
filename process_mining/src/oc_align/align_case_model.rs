@@ -287,6 +287,7 @@ impl ModelCaseChecker {
                 .collect();
 
             initial_place_names.sort(); // Sort lexicographically
+            initial_place_names.reverse();
 
             let mut initial_places = self.model.get_initial_places().clone();
 
@@ -356,6 +357,8 @@ impl ModelCaseChecker {
                 // If higher_types_used is true, do not add tokens to this and lower types
                 // Continue to the next place
             }
+            
+            println!("children: {:?}", children.iter().map(|c| &c.action).collect::<Vec<&SearchNodeAction>>());
         }
 
         //println!("Getting transitions");
@@ -364,6 +367,7 @@ impl ModelCaseChecker {
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
 
         for transition in self.model.transitions.values() {
+            println!("Transition: {}", transition.name);
             let firing_combinations = node.marking.get_firing_combinations(transition);
             if (firing_combinations.len() > 0) {
                 //println!("{}",transition.name);
@@ -444,7 +448,7 @@ impl ModelCaseChecker {
                 ));
             });
         }
-
+        println!("done getting transitions");
         // places are allowed to be dead as long as we keep adding tokens to alive them ;)
         if (!node.action.is_pre_firing()) {
             if !node
@@ -472,6 +476,7 @@ impl ModelCaseChecker {
                 return vec![];
             }
         }
+        println!("done checking dead");
 
         children
     }
@@ -585,7 +590,8 @@ mod tests {
 
         let best_node = result.unwrap();
         let total_cost = best_node.min_cost;
-
+        println!("events in best node: {:?}", best_node.partial_case_stats.query_event_counts);
+        println!("events in best node fr {:?}", best_node.partial_case.get_case_stats().query_event_counts);
         export_case_graph_image(
             &best_node.partial_case,
             "test_case_graph.png",
