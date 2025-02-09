@@ -411,13 +411,15 @@ impl<'a> CaseAlignment<'a> {
         // 5c. Add cost for unmapped nodes in c2
         let mapped_c2_nodes_count = mapped_c2_nodes.len();
         let total_c2_nodes = self.c2.nodes.len();
-        let unmapped_c2_nodes = (total_c2_nodes as isize - mapped_c2_nodes_count as isize).max(0) as f64;
+        let unmapped_c2_nodes =
+            (total_c2_nodes as isize - mapped_c2_nodes_count as isize).max(0) as f64;
         total += unmapped_c2_nodes;
 
         // 5d. Add cost for unmapped edges in c2
         let mapped_c2_edges_count = mapped_c2_edges.len();
         let total_c2_edges = self.c2.edges.len();
-        let unmapped_c2_edges = (total_c2_edges as isize - mapped_c2_edges_count as isize).max(0) as f64;
+        let unmapped_c2_edges =
+            (total_c2_edges as isize - mapped_c2_edges_count as isize).max(0) as f64;
         total += unmapped_c2_edges;
 
         Ok(total)
@@ -552,8 +554,8 @@ impl<'a> CaseAlignment<'a> {
 // Helper functions to check compatibility
 fn nodes_compatible(n1: &Node, n2: &Node) -> bool {
     match (n1, n2) {
-        (Node::Event(e1), Node::Event(e2)) => e1.event_type == e2.event_type,
-        (Node::Object(o1), Node::Object(o2)) => o1.object_type == o2.object_type,
+        (Node::EventNode(e1), Node::EventNode(e2)) => e1.event_type == e2.event_type,
+        (Node::ObjectNode(o1), Node::ObjectNode(o2)) => o1.object_type == o2.object_type,
         _ => false,
     }
 }
@@ -572,15 +574,15 @@ mod tests {
         let mut c2 = CaseGraph::new();
 
         // Populate c1
-        let event1 = Node::Event(Event {
+        let event1 = Node::EventNode(Event {
             id: 1,
             event_type: "A".to_string(),
         });
-        let event2 = Node::Event(Event {
+        let event2 = Node::EventNode(Event {
             id: 2,
             event_type: "B".to_string(),
         });
-        let object1 = Node::Object(Object {
+        let object1 = Node::ObjectNode(Object {
             id: 3,
             object_type: "Person".to_string(),
         });
@@ -591,19 +593,19 @@ mod tests {
         c1.add_edge(Edge::new(2, 2, 3, EdgeType::E2O));
 
         // Populate c2
-        let event3 = Node::Event(Event {
+        let event3 = Node::EventNode(Event {
             id: 4,
             event_type: "A".to_string(),
         });
-        let event4 = Node::Event(Event {
+        let event4 = Node::EventNode(Event {
             id: 5,
             event_type: "B".to_string(),
         });
-        let object2 = Node::Object(Object {
+        let object2 = Node::ObjectNode(Object {
             id: 6,
             object_type: "Person".to_string(),
         });
-        let object3 = Node::Object(Object {
+        let object3 = Node::ObjectNode(Object {
             id: 7,
             object_type: "Device".to_string(),
         });
@@ -630,7 +632,7 @@ mod tests {
                 }
             }
         }
-        
+
         println!("\nEdge Mappings:");
         for (&e1, mapping) in &alignment.edge_mapping {
             match mapping {
@@ -643,13 +645,12 @@ mod tests {
             }
         }
 
-
         // output the alignment total cost to console, if the alignment is valid else print the error message
         match alignment.total_cost() {
             Ok(cost) => println!("Total cost: {}", cost),
             Err(err) => println!("Error: {}", err),
         }
-        
+
         alignment.print_mappings();
     }
 }

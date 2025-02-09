@@ -1,3 +1,4 @@
+use crate::oc_align::util::reachability_cache::ReachabilityCache;
 use crate::oc_petri_net::oc_petri_net::{InputArc, ObjectCentricPetriNet, Transition};
 use crate::oc_petri_net::util::intersect_hashbag::intersect_hashbags;
 use hashbag::HashBag;
@@ -5,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::oc_align::util::reachability_cache::ReachabilityCache;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -160,6 +160,13 @@ impl Marking {
 
         // For each object type, find tokens that satisfy all input places
         for (_obj_type, places) in input_place_map.iter() {
+            // if (transition.name == "send package") {
+            //     println!("-------------------");
+            //     println!("transition: {}", transition.name);
+            //     println!("obj_type: {}", _obj_type);
+            //     println!("places: {:?}", places);
+            //     println!("-------------------");
+            // }
             let common_tokens =
                 intersect_hashbags(&*places.iter().map(|(_, bag, _)| bag).collect::<Vec<_>>());
 
@@ -247,10 +254,15 @@ impl Marking {
                 .assignments
                 .entry(arc.target_place_id)
                 .or_insert_with(|| HashBag::new());
-            for obj_binding in binding.object_binding_info.values() {
-                for token in obj_binding.tokens.iter() {
-                    bag.insert(token.clone());
-                }
+            let place = self.petri_net.get_place(&arc.target_place_id).unwrap();
+            for token in binding
+                .object_binding_info
+                .get(&place.object_type)
+                .unwrap()
+                .tokens
+                .iter()
+            {
+                bag.insert(token.clone());
             }
         }
     }
@@ -268,10 +280,25 @@ impl Marking {
 
     pub fn is_final_has_tokens(&self) -> bool {
         let has_tokens = self.assignments.values().any(|tokens| !tokens.is_empty());
-        has_tokens && self.assignments.iter().all(|(place_id, tokens)| {
-            tokens.is_empty() || self.petri_net.get_place(place_id).unwrap().final_place
-        })
+        has_tokens
+            && self.assignments.iter().all(|(place_id, tokens)| {
+                tokens.is_empty() || self.petri_net.get_place(place_id).unwrap().final_place
+            })
     }
+
+    pub fn get_initial_counts_per_type(&self) -> HashMap<String, usize> {
+        let mut initial_counts = HashMap::new();
+        for (place_id, tokens) in self.assignments.iter() {
+            let place = self.petri_net.get_place(place_id).unwrap();
+            if place.initial {
+                let obj_type = place.object_type.clone();
+                let count = tokens.len();
+                initial_counts.insert(obj_type, count);
+            }
+        }
+        initial_counts
+    }
+
     pub fn has_dead_places(
         &self,
         transition_enabled: &HashMap<Uuid, bool>,
@@ -295,7 +322,10 @@ impl Marking {
         for &place_id in &places_with_tokens {
             let place = match self.petri_net.get_place(&place_id) {
                 Some(p) => p,
-                None => panic!("Place with ID {:?} does not exist in the Petri net.", place_id),
+                None => panic!(
+                    "Place with ID {:?} does not exist in the Petri net.",
+                    place_id
+                ),
             };
 
             // Already filtered out final places, but double-check
@@ -380,7 +410,7 @@ impl Marking {
                             && reachability_cache.is_reachable(current_place_id, &input_id)
                     })
                 });
-                
+
                 // If at least one other input place is reachable, the transition can potentially be enabled
                 if other_inputs_reachable {
                     can_enable_transition = true;
@@ -429,6 +459,21 @@ pub struct Binding {
     /// Tokens to take out of the place
     pub transition_id: Uuid,
     pub object_binding_info: HashMap<String, ObjectBindingInfo>,
+}
+
+impl std::fmt::Display for Binding {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let object_names: Vec<String> = self
+            .object_binding_info
+            .values()
+            .map(|binding_info| {
+                let object_name = binding_info.object_type.clone();
+                let token_count = binding_info.tokens.len();
+                format!("{}: {}", object_name, token_count)
+            })
+            .collect();
+        write!(f, "{}", object_names.join(", "))
+    }
 }
 
 fn cartesian_product<T>(inputs: Vec<Vec<&T>>) -> Vec<Vec<&T>> {

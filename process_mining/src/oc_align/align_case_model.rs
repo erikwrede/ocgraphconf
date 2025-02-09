@@ -1,12 +1,13 @@
 use crate::oc_align::align_case::CaseAlignment;
+use crate::oc_align::util::perm::next_permutation;
+use crate::oc_align::util::reachability_cache::ReachabilityCache;
 use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Object};
 use crate::oc_petri_net::marking::{Binding, Marking};
 use crate::oc_petri_net::oc_petri_net::ObjectCentricPetriNet;
 use std::cmp::PartialEq;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::oc_align::util::reachability_cache::ReachabilityCache;
 
 #[derive(Debug, Clone)]
 struct SearchNode {
@@ -93,7 +94,7 @@ impl SearchNodeAction {
                         format!("{}: {}", object_name, token_count)
                     })
                     .collect();
-                
+
                 println!(
                     "Firing transition: {} with binding: {:?}",
                     object_centric_petri_net
@@ -157,8 +158,12 @@ impl ModelCaseChecker {
             SearchNodeAction::VOID,
         )];
         //println!("starting");
-
+        let mut counter = 0;
         while let Some(mut current_node) = open_list.pop() {
+            counter += 1;
+            if (counter >= 20000) {
+                break;
+            }
             //println!("Number of open nodes: {}", open_list.len());
             //println!("=====================");
             if current_node.min_cost >= global_upper_bound {
@@ -171,18 +176,20 @@ impl ModelCaseChecker {
             current_node.action.log(self.model.clone());
             // print all the keys in a single line
             let events = current_node.partial_case_stats.query_event_counts.keys();
-            //println!("Events: {:?}", events);
-
-            let alignment = CaseAlignment::align_mip(&current_node.partial_case, query_case);
-            //println!("Alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
-
-            let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
+            println!("Events: {:?}", events);
 
             if current_node.marking.is_final_has_tokens() {
                 // temporarily throw an error here so everything is stopped
                 // now output a lot of info such as a string repr of the current case we found and the cost etc
+                let alignment = CaseAlignment::align_mip(&current_node.partial_case, query_case);
+                //println!("Alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
+                let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
                 print!("Final marking reached");
                 print!("Cost: {}", alignment_cost);
+                println!(
+                    "fired events: {:?}",
+                    current_node.partial_case_stats.query_event_counts
+                );
                 //panic!("Final marking reached");
 
                 // Limit the scope of the mutable borrow using a separate block
@@ -196,7 +203,7 @@ impl ModelCaseChecker {
                         .iter()
                         .filter(|node| node.min_cost >= global_upper_bound)
                         .count();
-                    
+
                     println!("Number of nodes pruned due to best bound: {}", len);
 
                     // remove all nodes that have a cost higher than the new upper bound
@@ -204,10 +211,10 @@ impl ModelCaseChecker {
                 }
             }
 
-            if (alignment_cost > global_upper_bound) {
+            /*if (alignment_cost > global_upper_bound) {
                 //println!("Pruned node with cost: {}", alignment_cost);
                 continue;
-            }
+            }*/
             //println!("finding children");
             let children = self.generate_children(&current_node, &query_case_stats);
             for mut child in children {
@@ -269,47 +276,99 @@ impl ModelCaseChecker {
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
         //println!("GEtting initial places");
         if (node.action.is_pre_firing()) {
-            for place in self.model.get_initial_places() {
-                let mut new_marking = node.marking.clone();
-                let token_ids = new_marking.add_initial_token_count(&place.id, 1);
+            // Order the object types in the net lexicographically and remove duplicates
+            let mut initial_place_names: Vec<String> = self
+                .model
+                .get_initial_places()
+                .iter()
+                .map(|p| p.object_type.clone())
+                .collect::<HashSet<_>>() // Remove duplicates
+                .into_iter()
+                .collect();
 
-                let mut new_partial_case = node.partial_case.clone();
+            initial_place_names.sort(); // Sort lexicographically
 
-                let new_object = Node::Object(Object {
-                    id: token_ids[0],
-                    object_type: place.object_type.clone(),
-                });
+            let mut initial_places = self.model.get_initial_places().clone();
 
-                new_partial_case.add_node(new_object);
+            println!(
+                "Initial places: {:?}",
+                initial_places
+                    .iter()
+                    .map(|p| p.object_type.clone())
+                    .collect::<Vec<String>>()
+            );
+            initial_places = next_permutation(&initial_places);
+            println!(
+                "Initial places: {:?}",
+                initial_places
+                    .iter()
+                    .map(|p| p.object_type.clone())
+                    .collect::<Vec<String>>()
+            );
 
-                let mut new_partial_case_stats = node.partial_case_stats.clone();
-                new_partial_case_stats
-                    .query_object_counts
-                    .entry(place.object_type.clone())
-                    .and_modify(|e| *e += 1)
-                    .or_insert(1);
+            let counts_per_type = node.marking.get_initial_counts_per_type();
 
-                let min_cost = self.calculate_min_cost(&query_case_stats, &new_partial_case_stats);
+            // Iterate over the initial places in lexicographical order
+            for place in initial_places {
+                // Find the index of the current object's type in the sorted list
+                let type_index = initial_place_names
+                    .iter()
+                    .position(|t| t == &place.object_type)
+                    .expect("Object type should exist in initial_places");
 
-                children.push(SearchNode::new_with_stats(
-                    new_marking,
-                    new_partial_case,
-                    min_cost,
-                    None,
-                    SearchNodeAction::add_token(place.id.clone()),
-                    new_partial_case_stats,
-                ));
+                // Check if any higher lexicographical types have been used (i.e., have a count > 0)
+                let higher_types_used = initial_place_names[type_index + 1..]
+                    .iter()
+                    .any(|t| counts_per_type.get(t).map_or(false, |count| *count > 0));
+
+                // Only allow incrementing if no higher types have been used
+                if !higher_types_used {
+                    // Proceed to add a token to this place
+                    let mut new_marking = node.marking.clone();
+                    let token_ids = new_marking.add_initial_token_count(&place.id, 1);
+
+                    let mut new_partial_case = node.partial_case.clone();
+                    let new_object = Node::ObjectNode(Object {
+                        id: token_ids[0],
+                        object_type: place.object_type.clone(),
+                    });
+                    new_partial_case.add_node(new_object);
+
+                    let mut new_partial_case_stats = node.partial_case_stats.clone();
+                    new_partial_case_stats
+                        .query_object_counts
+                        .entry(place.object_type.clone())
+                        .and_modify(|e| *e += 1)
+                        .or_insert(1);
+
+                    let min_cost =
+                        self.calculate_min_cost(&query_case_stats, &new_partial_case_stats);
+
+                    children.push(SearchNode::new_with_stats(
+                        new_marking,
+                        new_partial_case,
+                        min_cost,
+                        None,
+                        SearchNodeAction::add_token(place.id.clone()),
+                        new_partial_case_stats,
+                    ));
+                }
+                // If higher_types_used is true, do not add tokens to this and lower types
+                // Continue to the next place
             }
         }
 
         //println!("Getting transitions");
 
         //
-
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
 
         for transition in self.model.transitions.values() {
             let firing_combinations = node.marking.get_firing_combinations(transition);
+            if (firing_combinations.len() > 0) {
+                //println!("{}",transition.name);
+                //println!("Firing combinations: {:?}", firing_combinations.iter().map(|c| c.to_string()).collect::<Vec<String>>());
+            }
 
             transition_enabled.insert(transition.id, firing_combinations.len() > 0);
 
@@ -324,7 +383,7 @@ impl ModelCaseChecker {
 
                 if (!transition.silent) {
                     let event_id = new_partial_case.nodes.len() + 1;
-                    let new_event = Node::Event(Event {
+                    let new_event = Node::EventNode(Event {
                         id: event_id,
                         event_type: transition.name.clone(),
                     });
@@ -385,21 +444,35 @@ impl ModelCaseChecker {
                 ));
             });
         }
-        
-        
+
         // places are allowed to be dead as long as we keep adding tokens to alive them ;)
         if (!node.action.is_pre_firing()) {
-            if !node.marking.has_dead_places(&transition_enabled, &self.reachability_cache).is_empty() {
+            if !node
+                .marking
+                .has_dead_places(&transition_enabled, &self.reachability_cache)
+                .is_empty()
+            {
                 // print a list of the names of all dead places
-                let dead_places = node.marking.has_dead_places(&transition_enabled, &self.reachability_cache);
+                let dead_places = node
+                    .marking
+                    .has_dead_places(&transition_enabled, &self.reachability_cache);
 
                 dead_places.iter().for_each(|place_id| {
-                    println!("Dead place: {}", self.model.get_place(place_id).unwrap().name.clone().unwrap_or("no_name".to_string()));
+                    println!(
+                        "Dead place: {}",
+                        self.model
+                            .get_place(place_id)
+                            .unwrap()
+                            .name
+                            .clone()
+                            .unwrap_or("no_name".to_string())
+                    );
                 });
 
                 return vec![];
-            }}
-        
+            }
+        }
+
         children
     }
 }
@@ -407,7 +480,9 @@ impl ModelCaseChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oc_case::visualization::export_case_graph_image;
     use crate::oc_petri_net::initialize_ocpn_from_json;
+    use graphviz_rust::cmd::Format;
     use std::fs;
 
     #[test]
@@ -448,11 +523,11 @@ mod tests {
         let mut query_case = CaseGraph::new();
 
         // Add nodes corresponding to the events in the query case
-        let event1 = Node::Event(Event {
+        let event1 = Node::EventNode(Event {
             id: 1,
             event_type: "T1".to_string(),
         });
-        let event2 = Node::Event(Event {
+        let event2 = Node::EventNode(Event {
             id: 2,
             event_type: "T2".to_string(),
         });
@@ -492,7 +567,7 @@ mod tests {
         let mut query_case = CaseGraph::new();
 
         // Add nodes corresponding to the events in the query case
-        let event1 = Node::Event(Event {
+        let event1 = Node::EventNode(Event {
             id: 1,
             event_type: "A".to_string(),
         });
@@ -503,13 +578,21 @@ mod tests {
         let mut checker = ModelCaseChecker::new(petri_net_arc);
 
         // Use branch_and_bound to find alignment
-        let result = checker.branch_and_bound( &query_case, initial_marking);
+        let result = checker.branch_and_bound(&query_case, initial_marking);
 
         // Validate if a result is found
         assert!(result.is_some(), "Failed to find a valid alignment");
 
         let best_node = result.unwrap();
         let total_cost = best_node.min_cost;
+
+        export_case_graph_image(
+            &best_node.partial_case,
+            "test_case_graph.png",
+            Format::Png,
+            Some(2.0),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -560,11 +643,11 @@ mod tests {
         let mut query_case = CaseGraph::new();
 
         // Add nodes corresponding to the events in the query case
-        let event1 = Node::Event(Event {
+        let event1 = Node::EventNode(Event {
             id: 1,
             event_type: "T1".to_string(),
         });
-        let event2 = Node::Event(Event {
+        let event2 = Node::EventNode(Event {
             id: 2,
             event_type: "T2".to_string(),
         });

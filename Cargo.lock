@@ -2048,6 +2048,7 @@ dependencies = [
  "flate2",
  "graphviz-rust",
  "hashbag",
+ "lazy_static",
  "polars",
  "quick-xml",
  "rayon",

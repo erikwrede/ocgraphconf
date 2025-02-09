@@ -21,15 +21,15 @@ id_based_impls!(Object);
 // Define the Node enum which can be either an Event or an Object
 #[derive(Debug, Clone)]
 pub enum Node {
-    Event(Event),
-    Object(Object),
+    EventNode(Event),
+    ObjectNode(Object),
 }
 
 impl Node {
     pub fn id(&self) -> usize {
         match self {
-            Node::Event(event) => event.id,
-            Node::Object(object) => object.id,
+            Node::EventNode(event) => event.id,
+            Node::ObjectNode(object) => object.id,
         }
     }
 }
@@ -107,10 +107,10 @@ impl CaseStats {
 // Define the CaseGraph structure
 #[derive(Debug, Clone)]
 pub struct CaseGraph {
-    pub nodes: HashMap<usize, Node>, // Keyed by node ID
-    pub edges: HashMap<usize, Edge>, // Keyed by edge ID
+    pub nodes: HashMap<usize, Node>,       // Keyed by node ID
+    pub edges: HashMap<usize, Edge>,       // Keyed by edge ID
     adjacency: HashMap<usize, Vec<usize>>, // from node ID -> Vec of edge IDs
-    id_to_index: HashMap<usize, usize>, // Map from node ID to index (if needed)
+    id_to_index: HashMap<usize, usize>,    // Map from node ID to index (if needed)
 }
 
 impl CaseGraph {
@@ -135,7 +135,10 @@ impl CaseGraph {
         let edge_id = edge.id;
         let from = edge.from;
         self.edges.insert(edge_id, edge);
-        self.adjacency.entry(from).or_insert_with(Vec::new).push(edge_id);
+        self.adjacency
+            .entry(from)
+            .or_insert_with(Vec::new)
+            .push(edge_id);
     }
 
     // Retrieve node by id
@@ -156,7 +159,8 @@ impl CaseGraph {
     // Retrieve neighbors by edge type
     pub fn get_neighbors_by_edge_type(&self, from: usize, edge_type: EdgeType) -> Vec<usize> {
         match self.adjacency.get(&from) {
-            Some(edge_ids) => edge_ids.iter()
+            Some(edge_ids) => edge_ids
+                .iter()
                 .filter_map(|eid| {
                     self.edges.get(eid).and_then(|edge| {
                         if edge.edge_type == edge_type {
@@ -176,10 +180,10 @@ impl CaseGraph {
         let mut object_counts = HashMap::new();
         for node in self.nodes.values() {
             match node {
-                Node::Event(event) => {
+                Node::EventNode(event) => {
                     *event_counts.entry(event.event_type.clone()).or_insert(0) += 1;
                 }
-                Node::Object(object) => {
+                Node::ObjectNode(object) => {
                     *object_counts.entry(object.object_type.clone()).or_insert(0) += 1;
                 }
             }
@@ -194,7 +198,7 @@ impl CaseGraph {
         }
         edge_counts
     }
-    
+
     pub fn get_case_stats(&self) -> CaseStats {
         let (query_event_counts, query_object_counts) = self.count_nodes_by_type();
         let query_edge_counts = self.count_edges_by_type();
@@ -213,27 +217,45 @@ mod tests {
     #[test]
     fn test_add_nodes() {
         let mut graph = CaseGraph::new();
-        let event1 = Event { id: 1, event_type: "A".to_string() };
-        let object1 = Object { id: 2, object_type: "Person".to_string() };
-        graph.add_node(Node::Event(event1.clone()));
-        graph.add_node(Node::Object(object1.clone()));
+        let event1 = Event {
+            id: 1,
+            event_type: "A".to_string(),
+        };
+        let object1 = Object {
+            id: 2,
+            object_type: "Person".to_string(),
+        };
+        graph.add_node(Node::EventNode(event1.clone()));
+        graph.add_node(Node::ObjectNode(object1.clone()));
         assert_eq!(graph.nodes.len(), 2);
-        assert_eq!(graph.get_node(1), Some(&Node::Event(event1)));
-        assert_eq!(graph.get_node(2), Some(&Node::Object(object1)));
+        assert_eq!(graph.get_node(1), Some(&Node::EventNode(event1)));
+        assert_eq!(graph.get_node(2), Some(&Node::ObjectNode(object1)));
     }
 
     #[test]
     fn test_add_edges() {
         let mut graph = CaseGraph::new();
         // Add nodes
-        let event1 = Event { id: 1, event_type: "A".to_string() };
-        let event2 = Event { id: 2, event_type: "B".to_string() };
-        let object1 = Object { id: 3, object_type: "Person".to_string() };
-        let object2 = Object { id: 4, object_type: "Device".to_string() };
-        graph.add_node(Node::Event(event1));
-        graph.add_node(Node::Event(event2));
-        graph.add_node(Node::Object(object1));
-        graph.add_node(Node::Object(object2));
+        let event1 = Event {
+            id: 1,
+            event_type: "A".to_string(),
+        };
+        let event2 = Event {
+            id: 2,
+            event_type: "B".to_string(),
+        };
+        let object1 = Object {
+            id: 3,
+            object_type: "Person".to_string(),
+        };
+        let object2 = Object {
+            id: 4,
+            object_type: "Device".to_string(),
+        };
+        graph.add_node(Node::EventNode(event1));
+        graph.add_node(Node::EventNode(event2));
+        graph.add_node(Node::ObjectNode(object1));
+        graph.add_node(Node::ObjectNode(object2));
         // Add edges
         let edge1 = Edge::new(1, 1, 2, EdgeType::DF); // Event1 -> Event2
         let edge2 = Edge::new(2, 3, 4, EdgeType::O2O); // Object1 -> Object2
@@ -260,18 +282,28 @@ mod tests {
         let graph = CaseGraph::new();
         // Attempt to get neighbors from an empty graph
         assert!(graph.get_neighbors_by_edge_type(1, EdgeType::DF).is_empty());
-        assert!(graph.get_neighbors_by_edge_type(2, EdgeType::O2O).is_empty());
-        assert!(graph.get_neighbors_by_edge_type(3, EdgeType::E2O).is_empty());
+        assert!(graph
+            .get_neighbors_by_edge_type(2, EdgeType::O2O)
+            .is_empty());
+        assert!(graph
+            .get_neighbors_by_edge_type(3, EdgeType::E2O)
+            .is_empty());
     }
 
     #[test]
     fn test_duplicate_edges() {
         let mut graph = CaseGraph::new();
         // Add nodes
-        let event1 = Event { id: 1, event_type: "A".to_string() };
-        let event2 = Event { id: 2, event_type: "B".to_string() };
-        graph.add_node(Node::Event(event1));
-        graph.add_node(Node::Event(event2));
+        let event1 = Event {
+            id: 1,
+            event_type: "A".to_string(),
+        };
+        let event2 = Event {
+            id: 2,
+            event_type: "B".to_string(),
+        };
+        graph.add_node(Node::EventNode(event1));
+        graph.add_node(Node::EventNode(event2));
         // Add duplicate DF edges
         let edge1 = Edge::new(1, 1, 2, EdgeType::DF);
         let edge2 = Edge::new(2, 1, 2, EdgeType::DF);
@@ -287,12 +319,21 @@ mod tests {
     fn test_multiple_edge_types() {
         let mut graph = CaseGraph::new();
         // Add nodes
-        let event1 = Event { id: 1, event_type: "A".to_string() };
-        let event2 = Event { id: 2, event_type: "B".to_string() };
-        let object1 = Object { id: 3, object_type: "Person".to_string() };
-        graph.add_node(Node::Event(event1));
-        graph.add_node(Node::Event(event2));
-        graph.add_node(Node::Object(object1));
+        let event1 = Event {
+            id: 1,
+            event_type: "A".to_string(),
+        };
+        let event2 = Event {
+            id: 2,
+            event_type: "B".to_string(),
+        };
+        let object1 = Object {
+            id: 3,
+            object_type: "Person".to_string(),
+        };
+        graph.add_node(Node::EventNode(event1));
+        graph.add_node(Node::EventNode(event2));
+        graph.add_node(Node::ObjectNode(object1));
         // Add different types of edges from event1
         let edge1 = Edge::new(1, 1, 2, EdgeType::DF); // DF edge
         let edge2 = Edge::new(2, 1, 3, EdgeType::E2O); // E2O edge

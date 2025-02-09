@@ -27,7 +27,7 @@ macro_rules! id_based_impls {
 #[derive(Debug, Clone)]
 pub struct InputArc {
     pub id: Uuid,
-    pub source_place_id: Uuid, // Place ID
+    pub source_place_id: Uuid,      // Place ID
     pub target_transition_id: Uuid, // Transition ID
     pub variable: bool,
     pub weight: i32,
@@ -37,7 +37,7 @@ pub struct InputArc {
 pub struct OutputArc {
     pub id: Uuid,
     pub source_transition_id: Uuid, // Transition ID
-    pub target_place_id: Uuid, // Place ID
+    pub target_place_id: Uuid,      // Place ID
     pub variable: bool,
     pub weight: i32,
 }
@@ -216,7 +216,11 @@ impl ObjectCentricPetriNet {
         self.input_arcs.insert(arc.id, Arc::clone(&arc));
         // Update relationships
         let place_arc = Arc::clone(&arc);
-        self.places.get_mut(&source_place_id).unwrap().output_arcs.insert(place_arc.clone());
+        self.places
+            .get_mut(&source_place_id)
+            .unwrap()
+            .output_arcs
+            .insert(place_arc.clone());
         self.transitions
             .get_mut(&target_transition_id)
             .unwrap()
@@ -242,10 +246,7 @@ impl ObjectCentricPetriNet {
         };
         let target_place = match self.places.get(&target_place_id) {
             Some(place) => place.clone(),
-            None => panic!(
-                "Target place with ID {:?} does not exist.",
-                target_place_id
-            ),
+            None => panic!("Target place with ID {:?} does not exist.", target_place_id),
         };
         let arc = Arc::new(OutputArc::new(
             source_transition_id,
@@ -299,23 +300,27 @@ impl ObjectCentricPetriNet {
     }
 
     pub fn get_pre_set_of_transition(&self, transition_id: &Uuid) -> Vec<Place> {
-        self.transitions.get(transition_id).map_or(Vec::new(), |transition| {
-            transition
-                .input_arcs
-                .iter()
-                .filter_map(|arc| self.places.get(&arc.source_place_id).cloned())
-                .collect()
-        })
+        self.transitions
+            .get(transition_id)
+            .map_or(Vec::new(), |transition| {
+                transition
+                    .input_arcs
+                    .iter()
+                    .filter_map(|arc| self.places.get(&arc.source_place_id).cloned())
+                    .collect()
+            })
     }
 
     pub fn get_post_set_of_transition(&self, transition_id: &Uuid) -> Vec<Place> {
-        self.transitions.get(transition_id).map_or(Vec::new(), |transition| {
-            transition
-                .output_arcs
-                .iter()
-                .filter_map(|arc| self.places.get(&arc.target_place_id).cloned())
-                .collect()
-        })
+        self.transitions
+            .get(transition_id)
+            .map_or(Vec::new(), |transition| {
+                transition
+                    .output_arcs
+                    .iter()
+                    .filter_map(|arc| self.places.get(&arc.target_place_id).cloned())
+                    .collect()
+            })
     }
 
     // Additional Helper Methods (Optional)
