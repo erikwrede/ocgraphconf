@@ -17,6 +17,7 @@ struct SearchNode {
     most_recent_event_id: Option<usize>,
     action: SearchNodeAction,
     partial_case_stats: CaseStats,
+    token_graph_id_mapping: HashMap<usize, usize>,
 }
 
 impl SearchNode {
@@ -26,6 +27,7 @@ impl SearchNode {
         min_cost: f64,
         most_recent_event_id: Option<usize>,
         action: SearchNodeAction,
+        token_graph_id_mapping: HashMap<usize, usize>,
     ) -> Self {
         SearchNode {
             marking,
@@ -34,6 +36,7 @@ impl SearchNode {
             min_cost,
             most_recent_event_id,
             action,
+            token_graph_id_mapping,
         }
     }
 
@@ -44,6 +47,7 @@ impl SearchNode {
         min_cost: f64,
         most_recent_event_id: Option<usize>,
         action: SearchNodeAction,
+        token_graph_id_mapping: HashMap<usize, usize>,
         partial_case_stats: CaseStats,
     ) -> Self {
         SearchNode {
@@ -53,6 +57,7 @@ impl SearchNode {
             min_cost,
             most_recent_event_id,
             action,
+            token_graph_id_mapping,
         }
     }
 }
@@ -156,14 +161,38 @@ impl ModelCaseChecker {
             0.0,
             None,
             SearchNodeAction::VOID,
+            HashMap::new(),
         )];
         //println!("starting");
         let mut counter = 0;
+        // save current time
+        let mut most_recent_timestamp = std::time::Instant::now();
         while let Some(mut current_node) = open_list.pop() {
             counter += 1;
-            if (counter >= 20000) {
+            // every 5 seconds print an update
+            if most_recent_timestamp.elapsed().as_secs() >= 5 {
+                most_recent_timestamp = std::time::Instant::now();
+                current_node.partial_case_stats.pretty_print_stats();
+                println!("=====================");
+                println!("Nodes explored: {}", counter);
+                println!("Open list length: {}", open_list.len());
+                println!("Current node min cost: {}", current_node.min_cost);
+                println!("Best node min cost: {}", global_upper_bound);
+            }
+            if (counter >= 80000) {
+                println!("No solution found");
+                current_node.partial_case_stats.pretty_print_stats();
+                let events = current_node.partial_case_stats.query_event_counts.keys();
+                println!("Events: {:?}", events);
+                println!("Current node min cost: {}", current_node.min_cost);
+                println!("Open list length: {}", open_list.len());
                 break;
             }
+            
+            // print an update every 100 nodes
+            
+            
+            
             //println!("Number of open nodes: {}", open_list.len());
             //println!("=====================");
             if current_node.min_cost >= global_upper_bound {
@@ -173,10 +202,10 @@ impl ModelCaseChecker {
             open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
             //current_node.partial_case_stats.pretty_print_stats();
             //println!("Solving node with min cost: {}", current_node.min_cost);
-            current_node.action.log(self.model.clone());
+            //current_node.action.log(self.model.clone());
             // print all the keys in a single line
             let events = current_node.partial_case_stats.query_event_counts.keys();
-            println!("Events: {:?}", events);
+            //println!("Events: {:?}", events);
 
             if current_node.marking.is_final_has_tokens() {
                 // temporarily throw an error here so everything is stopped
@@ -227,8 +256,14 @@ impl ModelCaseChecker {
             //println!("sorting list");
             // now sort the open_list so that we expand first on the lowest min cost node
             open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+            if(open_list.len() == 0 && best_node.is_none()) {
+                println!("No solution found");
+                current_node.partial_case_stats.pretty_print_stats();
+            }
         }
-
+        if(best_node.is_none()) {
+            println!("No solution found after exploring {} nodes", counter);
+        }
         best_node
     }
 
@@ -276,6 +311,13 @@ impl ModelCaseChecker {
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
         //println!("GEtting initial places");
         if (node.action.is_pre_firing()) {
+            
+            // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
+            // this is because we can only add tokens to the initial places in lexicographical order
+            
+            // check this by checking [INSERT HERE]
+            
+            
             // Order the object types in the net lexicographically and remove duplicates
             let mut initial_place_names: Vec<String> = self
                 .model
@@ -290,22 +332,7 @@ impl ModelCaseChecker {
             initial_place_names.reverse();
 
             let mut initial_places = self.model.get_initial_places().clone();
-
-            println!(
-                "Initial places: {:?}",
-                initial_places
-                    .iter()
-                    .map(|p| p.object_type.clone())
-                    .collect::<Vec<String>>()
-            );
-            initial_places = next_permutation(&initial_places);
-            println!(
-                "Initial places: {:?}",
-                initial_places
-                    .iter()
-                    .map(|p| p.object_type.clone())
-                    .collect::<Vec<String>>()
-            );
+            //initial_places = next_permutation(&initial_places);
 
             let counts_per_type = node.marking.get_initial_counts_per_type();
 
@@ -329,8 +356,10 @@ impl ModelCaseChecker {
                     let token_ids = new_marking.add_initial_token_count(&place.id, 1);
 
                     let mut new_partial_case = node.partial_case.clone();
+                    let object_id = new_partial_case.get_new_id();
+
                     let new_object = Node::ObjectNode(Object {
-                        id: token_ids[0],
+                        id: object_id.clone(),
                         object_type: place.object_type.clone(),
                     });
                     new_partial_case.add_node(new_object);
@@ -344,6 +373,8 @@ impl ModelCaseChecker {
 
                     let min_cost =
                         self.calculate_min_cost(&query_case_stats, &new_partial_case_stats);
+                    let mut new_token_graph_id_mapping = node.token_graph_id_mapping.clone();
+                    new_token_graph_id_mapping.insert(token_ids[0], object_id);
 
                     children.push(SearchNode::new_with_stats(
                         new_marking,
@@ -351,14 +382,13 @@ impl ModelCaseChecker {
                         min_cost,
                         None,
                         SearchNodeAction::add_token(place.id.clone()),
+                        new_token_graph_id_mapping,
                         new_partial_case_stats,
                     ));
                 }
                 // If higher_types_used is true, do not add tokens to this and lower types
                 // Continue to the next place
             }
-            
-            println!("children: {:?}", children.iter().map(|c| &c.action).collect::<Vec<&SearchNodeAction>>());
         }
 
         //println!("Getting transitions");
@@ -367,7 +397,7 @@ impl ModelCaseChecker {
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
 
         for transition in self.model.transitions.values() {
-            println!("Transition: {}", transition.name);
+            //println!("Transition: {}", transition.name);
             let firing_combinations = node.marking.get_firing_combinations(transition);
             if (firing_combinations.len() > 0) {
                 //println!("{}",transition.name);
@@ -386,7 +416,7 @@ impl ModelCaseChecker {
                 let mut new_partial_case_stats = node.partial_case_stats.clone();
 
                 if (!transition.silent) {
-                    let event_id = new_partial_case.nodes.len() + 1;
+                    let event_id = new_partial_case.get_new_id();
                     let new_event = Node::EventNode(Event {
                         id: event_id,
                         event_type: transition.name.clone(),
@@ -397,11 +427,12 @@ impl ModelCaseChecker {
                         .object_binding_info
                         .values()
                         .for_each(|binding_info| {
-                            binding_info.tokens.iter().for_each(|token_id| {
+                            binding_info.tokens.iter().for_each(|token| {
+                                let e20_edge_id = new_partial_case.get_new_id();
                                 new_partial_case.add_edge(Edge::new(
-                                    new_partial_case.edges.len() + 1,
+                                    e20_edge_id,
                                     event_id,
-                                    token_id.id,
+                                    node.token_graph_id_mapping.get(&token.id).unwrap().clone(),
                                     EdgeType::E2O,
                                 ));
                                 new_partial_case_stats
@@ -411,10 +442,10 @@ impl ModelCaseChecker {
                                     .or_insert(1);
                             })
                         });
-
+                    let df_edge_id = new_partial_case.get_new_id();
                     if let Some(prev_event_id) = node.most_recent_event_id {
                         new_partial_case.add_edge(Edge::new(
-                            new_partial_case.edges.len() + 1,
+                            df_edge_id,
                             prev_event_id,
                             event_id,
                             EdgeType::DF,
@@ -437,18 +468,21 @@ impl ModelCaseChecker {
                 }
 
                 let new_cost = self.calculate_min_cost(&query_case_stats, &new_partial_case_stats);
-
+                
+                let new_token_graph_id_mapping = node.token_graph_id_mapping.clone();
+                
                 children.push(SearchNode::new_with_stats(
                     new_marking,
                     new_partial_case,
                     new_cost,
                     most_recent_event_id,
                     SearchNodeAction::fire_transition(transition.id, combination.clone()),
+                    new_token_graph_id_mapping,
                     new_partial_case_stats,
                 ));
             });
         }
-        println!("done getting transitions");
+        //println!("done getting transitions");
         // places are allowed to be dead as long as we keep adding tokens to alive them ;)
         if (!node.action.is_pre_firing()) {
             if !node
@@ -476,7 +510,7 @@ impl ModelCaseChecker {
                 return vec![];
             }
         }
-        println!("done checking dead");
+        //println!("done checking dead");
 
         children
     }
@@ -489,6 +523,7 @@ mod tests {
     use crate::oc_petri_net::initialize_ocpn_from_json;
     use graphviz_rust::cmd::Format;
     use std::fs;
+    use crate::oc_case::serialization::serialize_case_graph;
 
     #[test]
     fn test_basic_alignment() {
@@ -590,8 +625,20 @@ mod tests {
 
         let best_node = result.unwrap();
         let total_cost = best_node.min_cost;
-        println!("events in best node: {:?}", best_node.partial_case_stats.query_event_counts);
-        println!("events in best node fr {:?}", best_node.partial_case.get_case_stats().query_event_counts);
+        println!(
+            "events in best node: {:?}",
+            best_node.partial_case_stats.query_event_counts
+        );
+        println!(
+            "events in best node fr {:?}",
+            best_node.partial_case.get_case_stats().query_event_counts
+        );
+        
+        let graph_json = serialize_case_graph(&best_node.partial_case);
+        // save that string to a file case_graph.json
+        
+        fs::write("case_graph.json", graph_json).expect("Unable to write file");
+        
         export_case_graph_image(
             &best_node.partial_case,
             "test_case_graph.png",
