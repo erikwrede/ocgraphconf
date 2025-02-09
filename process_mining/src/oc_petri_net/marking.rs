@@ -1,5 +1,5 @@
 use crate::oc_align::util::reachability_cache::ReachabilityCache;
-use crate::oc_petri_net::oc_petri_net::{InputArc, ObjectCentricPetriNet, Transition};
+use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
 use crate::oc_petri_net::util::intersect_hashbag::intersect_hashbags;
 use hashbag::HashBag;
 use std::collections::{HashMap, HashSet};
@@ -97,78 +97,47 @@ impl Marking {
 
     /// Returns all possible firing combinations for the given transition.
     pub fn get_firing_combinations(&self, transition: &Transition) -> Vec<Binding> {
-        let arcs_to_place: HashMap<Uuid, Vec<&InputArc>> =
-            transition
-                .input_arcs
-                .iter()
-                .fold(HashMap::new(), |mut acc, arc| {
-                    acc.entry(arc.source_place_id)
-                        .or_insert_with(Vec::new)
-                        .push(arc);
-                    acc
-                });
-
         let default: HashBag<OCToken> = HashBag::new();
-        let mut input_place_map: HashMap<String, Vec<(&Uuid, HashBag<OCToken>, usize)>> =
-            HashMap::new();
+        let mut input_place_map: HashMap<String, Vec<(&Uuid, &HashBag<OCToken>)>> = HashMap::new();
 
         let mut object_type_variable: HashMap<String, bool> = HashMap::new();
 
         // Group input places by object_type along with their required token counts
-        for (place_id, arcs) in arcs_to_place.iter() {
+        for arc in transition.input_arcs.iter() {
+            let place_id = &arc.source_place_id;
             let place = self.petri_net.get_place(place_id).expect("Place not found");
+
             let obj_type = place.object_type.clone();
-            let consuming_arc_count = arcs.len();
+
             let bag = self.assignments.get(place_id).unwrap_or(&default);
 
-            // all arcs to place must either be variable or non-variable
-            // if this is not the case, panic
-            let var_arc_count = arcs.iter().filter(|arc| arc.variable).count();
-            let non_var_arc_count = consuming_arc_count - var_arc_count;
+            object_type_variable.insert(obj_type.clone(), arc.variable);
 
-            let is_variable = var_arc_count > 0;
-
-            if is_variable && non_var_arc_count > 0 {
-                panic!("Petri-Net isn't well-formed! All arcs to a place must either be variable or non-variable");
-            }
-
-            // now insert the object type and if it is variable into the map, panic if that is incompatible with existing info in the map
-            if let Some(&is_var) = object_type_variable.get(&obj_type) {
-                if is_var != (is_variable) {
-                    panic!("Petri-Net isn't well-formed! All arcs to a place must either be variable or non-variable");
-                }
-            } else {
-                object_type_variable.insert(obj_type.clone(), is_variable);
-            }
-            if(bag.len() == 0) {
+            if (bag.len() == 0) {
                 return vec![];
             }
-            
-            // Filter the bag to retain only tokens with a count >= consuming_arc_count
-            let mut filtered_bag = bag.clone();
-            filtered_bag.retain(|_, count| {
-                if count >= consuming_arc_count {
-                    return count;
-                }
-                return 0;
-            });
 
             input_place_map
                 .entry(obj_type)
                 .or_insert_with(Vec::new)
-                .push((place_id, filtered_bag, consuming_arc_count));
+                .push((place_id, bag));
         }
+
         // One for obj_type, one for place, one for all variable arc combinations
         let mut obj_type_tokens: Vec<Vec<ObjectBindingInfo>> = Vec::new();
-        
+
+        let mut common_tokens_per_type: HashMap<String, HashBag<OCToken>> = HashMap::new();
+
         // first assert all obj types required for the transition have common tokens
         for (_obj_type, places) in input_place_map.iter() {
             let common_tokens =
-                intersect_hashbags(&*places.iter().map(|(_, bag, _)| bag).collect::<Vec<_>>());
+                intersect_hashbags(&*places.iter().map(|(_, bag)| *bag).collect::<Vec<_>>());
 
             if common_tokens.len() == 0 {
                 return vec![];
             }
+
+            common_tokens_per_type.insert(_obj_type.clone(), common_tokens);
         }
 
         // For each object type, find tokens that satisfy all input places
@@ -180,13 +149,7 @@ impl Marking {
             //      println!("places: {:?}", places);
             // //     println!("-------------------");
             // }
-            let common_tokens =
-                intersect_hashbags(&*places.iter().map(|(_, bag, _)| bag).collect::<Vec<_>>());
-
-            // If there are no common tokens, we can't fire the transition
-            if (common_tokens.len() == 0) {
-                return vec![];
-            }
+            let common_tokens = common_tokens_per_type.get(_obj_type).expect("Common tokens not found");
 
             let firings = {
                 //Normal places
@@ -198,9 +161,9 @@ impl Marking {
                             tokens: vec![token.clone()],
                             place_bindings: places
                                 .iter()
-                                .map(|(place_id, _, consuming_arc_count)| PlaceBinding {
-                                    count: *consuming_arc_count,
-                                    consumed: vec![token.clone(); *consuming_arc_count],
+                                .map(|(place_id, _)| PlaceBinding {
+                                    count: 1,
+                                    consumed: vec![token.clone()],
                                     place_id: *place_id.clone(),
                                 })
                                 .collect(),
@@ -210,7 +173,7 @@ impl Marking {
                     //Variable places
                     // compute possible combinations of tokens for the variable arc to take, at least one token must be taken
                     let mut power_sets = power_set(&common_tokens);
-                    if(power_sets.len() == 0) {
+                    if (power_sets.len() == 0) {
                         return vec![];
                     }
                     power_sets.swap_remove(0);
@@ -222,8 +185,8 @@ impl Marking {
                             tokens: token_set.iter().map(|token| token.clone()).collect(),
                             place_bindings: places
                                 .iter()
-                                .map(|(place_id, _, consuming_arc_count)| PlaceBinding {
-                                    count: *consuming_arc_count,
+                                .map(|(place_id, _)| PlaceBinding {
+                                    count: 1,
                                     consumed: token_set.iter().map(|token| token.clone()).collect(),
                                     place_id: *place_id.clone(),
                                 })
@@ -232,7 +195,7 @@ impl Marking {
                         .collect()
                 }
             };
-            
+
             obj_type_tokens.push(firings);
         }
 
