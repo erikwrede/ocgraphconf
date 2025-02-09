@@ -16,8 +16,7 @@ struct SearchNode {
     min_cost: f64,
     most_recent_event_id: Option<usize>,
     action: SearchNodeAction,
-    partial_case_stats: CaseStats,
-    token_graph_id_mapping: HashMap<usize, usize>,
+    partial_case_stats: CaseStats
 }
 
 impl SearchNode {
@@ -27,7 +26,6 @@ impl SearchNode {
         min_cost: f64,
         most_recent_event_id: Option<usize>,
         action: SearchNodeAction,
-        token_graph_id_mapping: HashMap<usize, usize>,
     ) -> Self {
         SearchNode {
             marking,
@@ -36,7 +34,6 @@ impl SearchNode {
             min_cost,
             most_recent_event_id,
             action,
-            token_graph_id_mapping,
         }
     }
 
@@ -47,7 +44,6 @@ impl SearchNode {
         min_cost: f64,
         most_recent_event_id: Option<usize>,
         action: SearchNodeAction,
-        token_graph_id_mapping: HashMap<usize, usize>,
         partial_case_stats: CaseStats,
     ) -> Self {
         SearchNode {
@@ -57,7 +53,6 @@ impl SearchNode {
             min_cost,
             most_recent_event_id,
             action,
-            token_graph_id_mapping,
         }
     }
 }
@@ -128,14 +123,14 @@ impl SearchNodeAction {
 }
 
 struct ModelCaseChecker {
-    object_id_mapping: HashMap<usize, usize>,
+    token_graph_id_mapping: HashMap<usize, usize>,
     reachability_cache: ReachabilityCache,
     model: Arc<ObjectCentricPetriNet>,
 }
 impl ModelCaseChecker {
     fn new(model: Arc<ObjectCentricPetriNet>) -> Self {
         ModelCaseChecker {
-            object_id_mapping: HashMap::new(),
+            token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
             model,
         }
@@ -160,8 +155,7 @@ impl ModelCaseChecker {
             CaseGraph::new(),
             0.0,
             None,
-            SearchNodeAction::VOID,
-            HashMap::new(),
+            SearchNodeAction::VOID
         )];
         //println!("starting");
         let mut counter = 0;
@@ -373,8 +367,7 @@ impl ModelCaseChecker {
 
                     let min_cost =
                         self.calculate_min_cost(&query_case_stats, &new_partial_case_stats);
-                    let mut new_token_graph_id_mapping = node.token_graph_id_mapping.clone();
-                    new_token_graph_id_mapping.insert(token_ids[0], object_id);
+                    self.token_graph_id_mapping.insert(token_ids[0], object_id);
 
                     children.push(SearchNode::new_with_stats(
                         new_marking,
@@ -382,7 +375,6 @@ impl ModelCaseChecker {
                         min_cost,
                         None,
                         SearchNodeAction::add_token(place.id.clone()),
-                        new_token_graph_id_mapping,
                         new_partial_case_stats,
                     ));
                 }
@@ -432,7 +424,7 @@ impl ModelCaseChecker {
                                 new_partial_case.add_edge(Edge::new(
                                     e20_edge_id,
                                     event_id,
-                                    node.token_graph_id_mapping.get(&token.id).unwrap().clone(),
+                                    self.token_graph_id_mapping.get(&token.id).unwrap().clone(),
                                     EdgeType::E2O,
                                 ));
                                 new_partial_case_stats
@@ -469,7 +461,6 @@ impl ModelCaseChecker {
 
                 let new_cost = self.calculate_min_cost(&query_case_stats, &new_partial_case_stats);
                 
-                let new_token_graph_id_mapping = node.token_graph_id_mapping.clone();
                 
                 children.push(SearchNode::new_with_stats(
                     new_marking,
@@ -477,7 +468,6 @@ impl ModelCaseChecker {
                     new_cost,
                     most_recent_event_id,
                     SearchNodeAction::fire_transition(transition.id, combination.clone()),
-                    new_token_graph_id_mapping,
                     new_partial_case_stats,
                 ));
             });
