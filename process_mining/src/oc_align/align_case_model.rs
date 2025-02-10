@@ -170,7 +170,7 @@ impl ModelCaseChecker {
         while let Some(mut current_node) = open_list.pop() {
             counter += 1;
             // every 5 seconds print an update
-            if most_recent_timestamp.elapsed().as_secs() >= 5 {
+            if most_recent_timestamp.elapsed().as_secs() >= 1 {
                 most_recent_timestamp = std::time::Instant::now();
                 println!("=====================");
                 println!("Nodes explored: {}", counter);
@@ -555,7 +555,7 @@ impl ModelCaseChecker {
                     .get(transition_name)
                     .unwrap_or(&0) as i64;
 
-            difference_b.partial_cmp(&difference_a).unwrap()
+            difference_a.partial_cmp(&difference_b ).unwrap()
         });
 
         children.append(&mut transition_children);
@@ -566,7 +566,7 @@ impl ModelCaseChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oc_case::serialization::serialize_case_graph;
+    use crate::oc_case::serialization::{deserialize_case_graph, serialize_case_graph};
     use crate::oc_case::visualization::export_case_graph_image;
     use crate::oc_petri_net::initialize_ocpn_from_json;
     use graphviz_rust::cmd::Format;
@@ -650,16 +650,14 @@ mod tests {
         // Wrap the petri net in Arc to match branch_and_bound signature
         let petri_net_arc = Arc::new(ocpn);
 
-        // Create a CaseGraph representing the query case
-        let mut query_case = CaseGraph::new();
-
-        // Add nodes corresponding to the events in the query case
-        let event1 = Node::EventNode(Event {
-            id: 1,
-            event_type: "A".to_string(),
-        });
-
-        query_case.add_node(event1);
+        // deserialize a query case from a json file
+        // load file as string
+        let case_file = fs::read_to_string("./src/oc_align/test_data/large_model/fitting_case_graph.json")
+            .expect("Unable to read file");
+        
+        let mut query_case = deserialize_case_graph(
+            case_file.as_str(),
+        );
 
         // Initialize ModelCaseChecker
         let mut checker = ModelCaseChecker::new(petri_net_arc);
