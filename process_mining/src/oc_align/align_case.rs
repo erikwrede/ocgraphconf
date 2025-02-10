@@ -161,22 +161,51 @@ impl<'a> CaseAlignment<'a> {
         }
 
         // Structure preservation: if two nodes are mapped, their edges should correspond
+
         for (&e1_id, e1) in &c1.edges {
             let from1 = e1.from;
             let to1 = e1.to;
             for (&e2_id, e2) in &c2.edges {
-                // If e1 maps to e2, then from1 maps to e2.from and to1 maps to e2.to
-                if let (Some(x_from), Some(x_to)) =
-                    (x_vars.get(&(from1, e2.from)), x_vars.get(&(to1, e2.to)))
-                {
-                    if let Some(y_var) = y_vars.get(&(e1_id, e2_id)) {
-                        // y >= x_from + x_to -1
+                if let Some(y_var) = y_vars.get(&(e1_id, e2_id)) {
+                    // Get node mapping variables
+                    let x_from = x_vars.get(&(from1, e2.from));
+                    let x_to = x_vars.get(&(to1, e2.to));
+
+                    if let (Some(x_from), Some(x_to)) = (x_from, x_to) {
+                        // Constraint 1: y_var <= x_from
+                        model.add_cons(
+                            vec![y_var.clone(), x_from.clone()],
+                            &[1.0, -1.0],
+                            -f64::INFINITY,
+                            0.0,
+                            &format!("struct_pres_from_e{}_e{}", e1_id, e2_id),
+                        );
+
+                        // Constraint 2: y_var <= x_to
+                        model.add_cons(
+                            vec![y_var.clone(), x_to.clone()],
+                            &[1.0, -1.0],
+                            -f64::INFINITY,
+                            0.0,
+                            &format!("struct_pres_to_e{}_e{}", e1_id, e2_id),
+                        );
+
+                        // Constraint 3: y_var >= x_from + x_to - 1
                         model.add_cons(
                             vec![y_var.clone(), x_from.clone(), x_to.clone()],
                             &[1.0, -1.0, -1.0],
                             -f64::INFINITY,
                             0.0,
-                            &format!("struct_pres_e{}_e{}", e1_id, e2_id),
+                            &format!("struct_pres_edge_e{}_e{}", e1_id, e2_id),
+                        );
+                    } else {
+                        // If either node mapping doesn't exist, y_var must be 0
+                        model.add_cons(
+                            vec![y_var.clone()],
+                            &[1.0],
+                            -f64::INFINITY,
+                            0.0,
+                            &format!("force_y_zero_e{}_e{}", e1_id, e2_id),
                         );
                     }
                 }
