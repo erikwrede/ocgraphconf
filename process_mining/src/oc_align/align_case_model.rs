@@ -555,10 +555,6 @@ impl ModelCaseChecker {
                     .get(transition_name)
                     .unwrap_or(&0) as i64;
 
-            // make it so that if the difference is the same, the transition with the lower cost is chosen
-            if difference_a == difference_b {
-                return a.min_cost.partial_cmp(&b.min_cost).unwrap();
-            }
             difference_a.partial_cmp(&difference_b).unwrap()
         });
 
