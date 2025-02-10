@@ -11,13 +11,13 @@ trait Mappable {
 }
 
 #[derive(Debug, Clone)]
-enum NodeMapping {
+pub enum NodeMapping {
     RealNode(usize, usize), // (c1_node, c2_node)
     VoidNode(usize, usize), // (c1_node, void_node_id)
 }
 
 #[derive(Debug, Clone)]
-enum EdgeMapping {
+pub enum EdgeMapping {
     RealEdge(usize, usize), // (c1_edge, c2_edge)
     VoidEdge(usize, usize), // (c1_edge, void_edge_id)
 }
@@ -424,6 +424,23 @@ impl<'a> CaseAlignment<'a> {
 
         Ok(total)
     }
+    
+    pub fn print_stats(&self) {
+        let total_cost = self.total_cost();
+        match total_cost {
+            Ok(cost) => {
+                println!("Total cost: {}", cost);
+            }
+            Err(err) => {
+                println!("Error: {}", err);
+            }
+        }
+        
+        // print amount of void edges
+        println!("Void edges: {}", self.void_edges.len());
+        // print amount of void nodes
+        println!("Void nodes: {}", self.void_nodes.len());
+    }
 
     /// Prints the mappings of the alignment in a readable format.
     ///
@@ -619,7 +636,6 @@ mod tests {
 
         // Align using MIP
         let alignment = CaseAlignment::align_mip(&c1, &c2);
-
         // Print the alignment
         println!("Node Mappings:");
         for (&n1, mapping) in &alignment.node_mapping {

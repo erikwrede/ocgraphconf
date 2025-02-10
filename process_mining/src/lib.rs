@@ -52,6 +52,7 @@ pub mod utils;
 pub mod oc_petri_net;
 pub mod oc_case;
 pub mod oc_align;
+mod type_storage;
 
 ///
 /// Petri nets

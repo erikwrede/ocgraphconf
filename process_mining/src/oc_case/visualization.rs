@@ -17,10 +17,6 @@ pub fn export_case_graph_image<P: AsRef<std::path::Path>>(
     dpi_factor: Option<f32>,
 ) -> Result<(), std::io::Error> {
     let g = export_case_graph_to_dot_graph(graph, dpi_factor);
-    let dot_string = g.print(&mut PrinterContext::default());
-    println!("{}", dot_string);
-    
-    
     let out = graphviz_rust::exec(g, &mut PrinterContext::default(), vec![format.into()])?;
     let mut f = File::create(path)?;
     f.write_all(&out)?;

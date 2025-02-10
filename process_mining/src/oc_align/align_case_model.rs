@@ -555,7 +555,7 @@ impl ModelCaseChecker {
                     .get(transition_name)
                     .unwrap_or(&0) as i64;
 
-            difference_a.partial_cmp(&difference_b ).unwrap()
+            difference_a.partial_cmp(&difference_b).unwrap()
         });
 
         children.append(&mut transition_children);
@@ -566,6 +566,7 @@ impl ModelCaseChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oc_align::visualization::case_visual::export_c2_with_alignment_image;
     use crate::oc_case::serialization::{deserialize_case_graph, serialize_case_graph};
     use crate::oc_case::visualization::export_case_graph_image;
     use crate::oc_petri_net::initialize_ocpn_from_json;
@@ -652,12 +653,11 @@ mod tests {
 
         // deserialize a query case from a json file
         // load file as string
-        let case_file = fs::read_to_string("./src/oc_align/test_data/large_model/fitting_case_graph.json")
-            .expect("Unable to read file");
-        
-        let mut query_case = deserialize_case_graph(
-            case_file.as_str(),
-        );
+        let case_file =
+            fs::read_to_string("./src/oc_align/test_data/large_model/fitting_case_graph.json")
+                .expect("Unable to read file");
+
+        let mut query_case = deserialize_case_graph(case_file.as_str());
 
         // Initialize ModelCaseChecker
         let mut checker = ModelCaseChecker::new(petri_net_arc);
@@ -670,19 +670,14 @@ mod tests {
 
         let best_node = result.unwrap();
         let total_cost = best_node.min_cost;
-        println!(
-            "events in best node: {:?}",
-            best_node.partial_case_stats.query_event_counts
-        );
-        println!(
-            "events in best node fr {:?}",
-            best_node.partial_case.get_case_stats().query_event_counts
-        );
 
         let graph_json = serialize_case_graph(&best_node.partial_case);
         // save that string to a file case_graph.json
 
         fs::write("case_graph.json", graph_json).expect("Unable to write file");
+
+        export_case_graph_image(&query_case, "query_case_graph.png", Format::Png, Some(2.0))
+            .unwrap();
 
         export_case_graph_image(
             &best_node.partial_case,
@@ -691,6 +686,19 @@ mod tests {
             Some(2.0),
         )
         .unwrap();
+
+        let alignment = CaseAlignment::align_mip(&query_case, &best_node.partial_case);
+        alignment.print_stats();
+        // print
+
+        export_c2_with_alignment_image(
+            &best_node.partial_case,
+            &alignment,
+            "c2_with_alignment.png",
+            Format::Png,
+            Some(2.0),
+        )
+        .expect("Failed to export visualization.");
     }
 
     #[test]
