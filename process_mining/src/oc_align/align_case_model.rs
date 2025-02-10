@@ -170,9 +170,9 @@ impl ModelCaseChecker {
         while let Some(mut current_node) = open_list.pop() {
             counter += 1;
             // every 5 seconds print an update
-            if most_recent_timestamp.elapsed().as_secs() >= 1 {
+            if most_recent_timestamp.elapsed().as_secs() >= 20 {
                 most_recent_timestamp = std::time::Instant::now();
-                println!("=====================");
+                println!("===================== Progress update =====================");
                 println!("Nodes explored: {}", counter);
                 println!("Open list length: {}", open_list.len());
                 println!("Current node min cost: {}", current_node.min_cost);
@@ -188,7 +188,7 @@ impl ModelCaseChecker {
                 println!("---------------------");
                 current_node.partial_case_stats.pretty_print_stats();
             }
-            if (counter >= 800000) {
+            if (counter >= 800000) && false {
                 println!("No solution found");
                 current_node.partial_case_stats.pretty_print_stats();
                 let events = current_node.partial_case_stats.query_event_counts.keys();
@@ -217,7 +217,7 @@ impl ModelCaseChecker {
             if current_node.marking.is_final_has_tokens() {
                 // temporarily throw an error here so everything is stopped
                 // now output a lot of info such as a string repr of the current case we found and the cost etc
-                let alignment = CaseAlignment::align_mip(&current_node.partial_case, query_case);
+                let alignment = CaseAlignment::align_mip(query_case,&current_node.partial_case);
                 //println!("Alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
                 let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
                 println!("Final marking reached after exploring {} nodes", counter);
@@ -572,6 +572,7 @@ mod tests {
     use crate::oc_petri_net::initialize_ocpn_from_json;
     use graphviz_rust::cmd::Format;
     use std::fs;
+    use crate::oc_case::dummy_ocel_1_serialization::json_to_case_graph;
 
     #[test]
     fn test_basic_alignment() {
@@ -641,7 +642,29 @@ mod tests {
         println!("Best alignment cost: {}", total_cost);
         //best_node.partial_case.print_mappings();
     }
+    
+    #[test]
+    fn other() {
 
+        let json_data = fs::read_to_string("./src/oc_petri_net/util/oc_petri_net.json").unwrap();
+        let ocpn = initialize_ocpn_from_json(&json_data);
+        
+        // Wrap the petri net in Arc to match branch_and_bound signature
+        let petri_net_arc = Arc::new(ocpn);
+
+        // deserialize a query case from a json file
+        // load file as string
+        let case_file =
+            fs::read_to_string("./src/oc_case/test_data/variant_6eb2da5f3f3f7ea94ca51f1a72de8f47.jsonocel")
+                .expect("Unable to read file");
+
+        let mut query_case = json_to_case_graph(case_file.as_str());
+        
+        // now visualize the case graph
+        export_case_graph_image(&query_case, "test_case_graph.png", Format::Png, Some(2.0))
+            .unwrap();
+    }
+    
     #[test]
     fn large_petri_net() {
         let json_data = fs::read_to_string("./src/oc_petri_net/util/oc_petri_net.json").unwrap();
@@ -654,10 +677,10 @@ mod tests {
         // deserialize a query case from a json file
         // load file as string
         let case_file =
-            fs::read_to_string("./src/oc_align/test_data/large_model/fitting_case_graph.json")
+            fs::read_to_string("./src/oc_case/test_data/variant_6eb2da5f3f3f7ea94ca51f1a72de8f47.jsonocel")
                 .expect("Unable to read file");
 
-        let mut query_case = deserialize_case_graph(case_file.as_str());
+        let mut query_case = json_to_case_graph(case_file.as_str());
 
         // Initialize ModelCaseChecker
         let mut checker = ModelCaseChecker::new(petri_net_arc);
