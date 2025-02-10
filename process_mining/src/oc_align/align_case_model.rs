@@ -1,5 +1,4 @@
 use crate::oc_align::align_case::CaseAlignment;
-use crate::oc_align::util::perm::next_permutation;
 use crate::oc_align::util::reachability_cache::ReachabilityCache;
 use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Object};
 use crate::oc_petri_net::marking::{Binding, Marking};
@@ -16,7 +15,7 @@ struct SearchNode {
     min_cost: f64,
     most_recent_event_id: Option<usize>,
     action: SearchNodeAction,
-    partial_case_stats: CaseStats
+    partial_case_stats: CaseStats,
 }
 
 impl SearchNode {
@@ -78,6 +77,13 @@ impl SearchNodeAction {
         match self {
             SearchNodeAction::FireTransition(_, _) => false,
             _ => true,
+        }
+    }
+
+    fn transition_id(&self) -> Option<Uuid> {
+        match self {
+            SearchNodeAction::FireTransition(transition_id, _) => Some(*transition_id),
+            _ => None,
         }
     }
 
@@ -155,7 +161,7 @@ impl ModelCaseChecker {
             CaseGraph::new(),
             0.0,
             None,
-            SearchNodeAction::VOID
+            SearchNodeAction::VOID,
         )];
         //println!("starting");
         let mut counter = 0;
@@ -166,14 +172,23 @@ impl ModelCaseChecker {
             // every 5 seconds print an update
             if most_recent_timestamp.elapsed().as_secs() >= 5 {
                 most_recent_timestamp = std::time::Instant::now();
-                current_node.partial_case_stats.pretty_print_stats();
                 println!("=====================");
                 println!("Nodes explored: {}", counter);
                 println!("Open list length: {}", open_list.len());
                 println!("Current node min cost: {}", current_node.min_cost);
                 println!("Best node min cost: {}", global_upper_bound);
+                println!(
+                    "Types in the net: {:?}",
+                    self.model
+                        .get_initial_places()
+                        .iter()
+                        .map(|p| p.object_type.clone())
+                        .collect::<HashSet<_>>()
+                );
+                println!("---------------------");
+                current_node.partial_case_stats.pretty_print_stats();
             }
-            if (counter >= 80000) {
+            if (counter >= 800000) {
                 println!("No solution found");
                 current_node.partial_case_stats.pretty_print_stats();
                 let events = current_node.partial_case_stats.query_event_counts.keys();
@@ -182,11 +197,9 @@ impl ModelCaseChecker {
                 println!("Open list length: {}", open_list.len());
                 break;
             }
-            
+
             // print an update every 100 nodes
-            
-            
-            
+
             //println!("Number of open nodes: {}", open_list.len());
             //println!("=====================");
             if current_node.min_cost >= global_upper_bound {
@@ -207,8 +220,8 @@ impl ModelCaseChecker {
                 let alignment = CaseAlignment::align_mip(&current_node.partial_case, query_case);
                 //println!("Alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
                 let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
-                print!("Final marking reached");
-                print!("Cost: {}", alignment_cost);
+                println!("Final marking reached after exploring {} nodes", counter);
+                println!("Cost: {}", alignment_cost);
                 println!(
                     "fired events: {:?}",
                     current_node.partial_case_stats.query_event_counts
@@ -240,8 +253,11 @@ impl ModelCaseChecker {
             }*/
             //println!("finding children");
             let children = self.generate_children(&current_node, &query_case_stats);
+            //println!("----");
+            //current_node.partial_case_stats.pretty_print_stats();
             for mut child in children {
                 if child.min_cost < global_upper_bound {
+                    //child.action.log(self.model.clone());
                     open_list.push(child);
                 } else {
                     ////println!("Pruned node before exploring with min cost: {}", child.min_cost);
@@ -250,12 +266,12 @@ impl ModelCaseChecker {
             //println!("sorting list");
             // now sort the open_list so that we expand first on the lowest min cost node
             open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
-            if(open_list.len() == 0 && best_node.is_none()) {
+            if (open_list.len() == 0 && best_node.is_none()) {
                 println!("No solution found");
                 current_node.partial_case_stats.pretty_print_stats();
             }
         }
-        if(best_node.is_none()) {
+        if (best_node.is_none()) {
             println!("No solution found after exploring {} nodes", counter);
         }
         best_node
@@ -305,13 +321,11 @@ impl ModelCaseChecker {
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
         //println!("GEtting initial places");
         if (node.action.is_pre_firing()) {
-            
             // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
             // this is because we can only add tokens to the initial places in lexicographical order
-            
+
             // check this by checking [INSERT HERE]
-            
-            
+
             // Order the object types in the net lexicographically and remove duplicates
             let mut initial_place_names: Vec<String> = self
                 .model
@@ -323,14 +337,24 @@ impl ModelCaseChecker {
                 .collect();
 
             initial_place_names.sort(); // Sort lexicographically
-            initial_place_names.reverse();
+                                        //initial_place_names.reverse();
 
             let mut initial_places = self.model.get_initial_places().clone();
             //initial_places = next_permutation(&initial_places);
 
             let counts_per_type = node.marking.get_initial_counts_per_type();
 
-            // Iterate over the initial places in lexicographical order
+            // sort the place by amount of tokens in the marking
+            initial_places.sort_by(|a, b| {
+                let a_count = counts_per_type.get(&a.object_type).unwrap_or(&0);
+                let b_count = counts_per_type.get(&b.object_type).unwrap_or(&0);
+                if a_count == b_count {
+                    return b.object_type.cmp(&a.object_type);
+                }
+                // TODO improvement? do not only consider count, but also the count in the case graph
+                b_count.cmp(&a_count)
+            });
+
             for place in initial_places {
                 // Find the index of the current object's type in the sorted list
                 let type_index = initial_place_names
@@ -388,6 +412,7 @@ impl ModelCaseChecker {
         //
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
 
+        let mut transition_children: Vec<SearchNode> = Vec::new();
         for transition in self.model.transitions.values() {
             //println!("Transition: {}", transition.name);
             let firing_combinations = node.marking.get_firing_combinations(transition);
@@ -460,9 +485,8 @@ impl ModelCaseChecker {
                 }
 
                 let new_cost = self.calculate_min_cost(&query_case_stats, &new_partial_case_stats);
-                
-                
-                children.push(SearchNode::new_with_stats(
+
+                transition_children.push(SearchNode::new_with_stats(
                     new_marking,
                     new_partial_case,
                     new_cost,
@@ -502,6 +526,43 @@ impl ModelCaseChecker {
         }
         //println!("done checking dead");
 
+        // sort the transitions by the difference between case stats and query case stats
+        transition_children.sort_by(|a, b| {
+            // prioritize transitions that have a higher difference between the case stats and the query case stats
+            // all actions in this list are transitions
+            let transition_a = a.action.transition_id().unwrap();
+
+            let transition_name = &self.model.get_transition(&transition_a).unwrap().name;
+
+            let difference_a = *query_case_stats
+                .query_event_counts
+                .get(transition_name)
+                .unwrap_or(&0) as i64
+                - *a.partial_case_stats
+                    .query_event_counts
+                    .get(transition_name)
+                    .unwrap_or(&0) as i64;
+
+            let transition_b = b.action.transition_id().unwrap();
+            let transition_name = &self.model.get_transition(&transition_b).unwrap().name;
+
+            let difference_b = *query_case_stats
+                .query_event_counts
+                .get(transition_name)
+                .unwrap_or(&0) as i64
+                - *b.partial_case_stats
+                    .query_event_counts
+                    .get(transition_name)
+                    .unwrap_or(&0) as i64;
+
+            // make it so that if the difference is the same, the transition with the lower cost is chosen
+            if difference_a == difference_b {
+                return a.min_cost.partial_cmp(&b.min_cost).unwrap();
+            }
+            difference_a.partial_cmp(&difference_b).unwrap()
+        });
+
+        children.append(&mut transition_children);
         children
     }
 }
@@ -509,11 +570,11 @@ impl ModelCaseChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oc_case::serialization::serialize_case_graph;
     use crate::oc_case::visualization::export_case_graph_image;
     use crate::oc_petri_net::initialize_ocpn_from_json;
     use graphviz_rust::cmd::Format;
     use std::fs;
-    use crate::oc_case::serialization::serialize_case_graph;
 
     #[test]
     fn test_basic_alignment() {
@@ -623,12 +684,12 @@ mod tests {
             "events in best node fr {:?}",
             best_node.partial_case.get_case_stats().query_event_counts
         );
-        
+
         let graph_json = serialize_case_graph(&best_node.partial_case);
         // save that string to a file case_graph.json
-        
+
         fs::write("case_graph.json", graph_json).expect("Unable to write file");
-        
+
         export_case_graph_image(
             &best_node.partial_case,
             "test_case_graph.png",
