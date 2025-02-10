@@ -206,7 +206,7 @@ impl ModelCaseChecker {
                 continue;
             }
 
-            open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+            //open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
             //current_node.partial_case_stats.pretty_print_stats();
             //println!("Solving node with min cost: {}", current_node.min_cost);
             //current_node.action.log(self.model.clone());
@@ -265,7 +265,7 @@ impl ModelCaseChecker {
             }
             //println!("sorting list");
             // now sort the open_list so that we expand first on the lowest min cost node
-            open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+            //open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
             if (open_list.len() == 0 && best_node.is_none()) {
                 println!("No solution found");
                 current_node.partial_case_stats.pretty_print_stats();
