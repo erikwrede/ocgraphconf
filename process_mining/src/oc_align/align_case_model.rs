@@ -555,7 +555,7 @@ impl ModelCaseChecker {
                     .get(transition_name)
                     .unwrap_or(&0) as i64;
 
-            difference_a.partial_cmp(&difference_b).unwrap()
+            difference_b.partial_cmp(&difference_a).unwrap()
         });
 
         children.append(&mut transition_children);
