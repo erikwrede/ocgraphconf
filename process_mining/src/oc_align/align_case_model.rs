@@ -5,6 +5,7 @@ use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Ob
 use crate::oc_case::visualization::export_case_graph_image;
 use crate::oc_petri_net::marking::{Binding, Marking};
 use crate::oc_petri_net::oc_petri_net::ObjectCentricPetriNet;
+use crate::type_storage::TYPE_STORAGE;
 use graphviz_rust::cmd::Format;
 use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet};
@@ -234,7 +235,7 @@ impl ModelCaseChecker {
         let mut global_upper_bound = 5000.0;
         let mut global_lower_bound = 0.0;
         let mut best_node: Option<SearchNode> = None;
-        
+
         println!(
             "Types in the net: {:?}",
             self.model
@@ -350,13 +351,45 @@ impl ModelCaseChecker {
             // print all the keys in a single line
             let events = current_node.partial_case_stats.query_event_counts.keys();
             //println!("Events: {:?}", events);
-            
+
+            let generate_children = true;
             if current_node.marking.is_final_has_tokens() {
                 mip_counter += 1;
                 // temporarily throw an error here so everything is stopped
                 // now output a lot of info such as a string repr of the current case we found and the cost etc
                 let alignment = CaseAlignment::align_mip(query_case, &current_node.partial_case);
                 //println!("Alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
+                /*
+                if ((alignment.void_nodes.len() + alignment.void_edges.len()
+                    - static_void_cost as usize)
+                    <= 1)
+                {
+                    println!(
+                        "Difference {}",
+                        alignment.void_nodes.len() + alignment.void_edges.len()
+                            - static_void_cost as usize
+                    );
+                    println!(
+                        "Void nodes: {:?}",
+                        alignment
+                            .void_nodes
+                            .values()
+                            .map(|n| n.type_name())
+                            .collect::<Vec<_>>()
+                    );
+
+                    // visualize alignment in file
+                    export_c2_with_alignment_image(
+                        &current_node.partial_case,
+                        &alignment,
+                        format!("./intermediates_2/alignment_{}_case.png", counter).as_str(),
+                        Format::Png,
+                        Some(2.0),
+                    );
+                }*/
+
+                // print a list of type names of void nodes
+
                 let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
                 // println!("Final marking reached after exploring {} nodes", counter);
                 // println!("Cost: {}", alignment_cost);
@@ -386,29 +419,21 @@ impl ModelCaseChecker {
                     // remove all nodes that have a cost higher than the new upper bound
                     open_list.retain(|node| node.min_cost < global_upper_bound);
                 }
-            } else {
-                
             }
 
-            /*if (alignment_cost > global_upper_bound) {
-                //println!("Pruned node with cost: {}", alignment_cost);
-                continue;
-            }*/
-            //println!("finding children");
-            let children =
-                self.generate_children(&current_node, &query_case_stats, static_void_cost);
-            //println!("----");
-            //current_node.partial_case_stats.pretty_print_stats();
-            for mut child in children {
-                if child.min_cost < global_upper_bound {
-                    //child.action.log(self.model.clone());
-                    open_list.push(child);
-                } else {
-                    ////println!("Pruned node before exploring with min cost: {}", child.min_cost);
+            if (generate_children) {
+                let children =
+                    self.generate_children(&current_node, &query_case_stats, static_void_cost);
+                for mut child in children {
+                    if child.min_cost < global_upper_bound {
+                        //child.action.log(self.model.clone());
+                        open_list.push(child);
+                    } else {
+                        ////println!("Pruned node before exploring with min cost: {}", child.min_cost);
+                    }
                 }
             }
-            //println!("sorting list");
-            // now sort the open_list so that we expand first on the lowest min cost node
+
             open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
             if (open_list.len() == 0 && best_node.is_none()) {
                 println!("No solution found");
@@ -446,10 +471,19 @@ impl ModelCaseChecker {
             total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
         }
 
+        /*
         for (edge_type, &partial_count) in &partial_case_stats.query_edge_counts {
             let query_count = query_case_stats
                 .query_edge_counts
                 .get(edge_type)
+                .unwrap_or(&0);
+            total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
+        }*/
+
+        for ((edge_type, a, b), &partial_count) in &partial_case_stats.edge_type_counts {
+            let query_count = query_case_stats
+                .edge_type_counts
+                .get(&(*edge_type, *a, *b))
                 .unwrap_or(&0);
             total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
         }
@@ -630,7 +664,7 @@ impl ModelCaseChecker {
                 let mut new_marking = node.marking.clone();
                 let mut new_partial_case = node.partial_case.clone();
 
-                let mut most_recent_event_id = node.most_recent_event_id;
+                let mut most_recent_event_id = node.most_recent_event_id.clone();
 
                 new_marking.fire_transition(transition, combination);
                 let mut new_partial_case_stats = node.partial_case_stats.clone();
@@ -642,6 +676,8 @@ impl ModelCaseChecker {
                         event_type: transition.name.clone(),
                     });
                     new_partial_case.add_node(new_event);
+
+                    let mut type_storage = TYPE_STORAGE.write().unwrap();
 
                     combination
                         .object_binding_info
@@ -660,8 +696,17 @@ impl ModelCaseChecker {
                                     .entry(EdgeType::E2O)
                                     .and_modify(|e| *e += 1)
                                     .or_insert(1);
+
+                                let a = type_storage.get_type_id(transition.name.as_str());
+                                let b = type_storage.get_type_id(binding_info.object_type.as_str());
+
+                                *new_partial_case_stats
+                                    .edge_type_counts
+                                    .entry((EdgeType::E2O, a, b))
+                                    .or_insert(0) += 1;
                             })
                         });
+
                     let df_edge_id = new_partial_case.get_new_id();
                     if let Some(prev_event_id) = node.most_recent_event_id {
                         new_partial_case.add_edge(Edge::new(
@@ -670,17 +715,29 @@ impl ModelCaseChecker {
                             event_id,
                             EdgeType::DF,
                         ));
+                        new_partial_case_stats
+                            .query_edge_counts
+                            .entry(EdgeType::DF)
+                            .and_modify(|e| *e += 1)
+                            .or_insert(1);
+
+                        let a = type_storage.get_type_id(
+                            &new_partial_case
+                                .get_node(prev_event_id)
+                                .unwrap()
+                                .type_name(),
+                        );
+                        let b = type_storage.get_type_id(transition.name.as_str());
+
+                        *new_partial_case_stats
+                            .edge_type_counts
+                            .entry((EdgeType::DF, a, b))
+                            .or_insert(0) += 1;
                     }
 
                     new_partial_case_stats
                         .query_event_counts
                         .entry(transition.name.clone())
-                        .and_modify(|e| *e += 1)
-                        .or_insert(1);
-
-                    new_partial_case_stats
-                        .query_edge_counts
-                        .entry(EdgeType::DF)
                         .and_modify(|e| *e += 1)
                         .or_insert(1);
 
@@ -922,11 +979,11 @@ mod tests {
                 println!("Solution found for case {:?}", path);
                 // save the alignment result as an image in a directory next to /Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi
                 let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
-
+                let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
                 export_c2_with_alignment_image(
                     &result_node.partial_case,
                     &alignment,
-                    output_path.to_str().unwrap().to_owned() + "_aligned.png",
+                    output_path.to_str().unwrap().to_owned() + format!("_aligned_cost_{}.png", cost).as_str(),
                     Format::Png,
                     Some(2.0),
                 )

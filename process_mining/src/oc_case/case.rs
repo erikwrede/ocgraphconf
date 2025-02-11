@@ -1,8 +1,8 @@
 use crate::id_based_impls;
+use crate::type_storage::TYPE_STORAGE;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::AtomicUsize;
-use serde::{Deserialize, Serialize};
 
 // Define the Event struct
 #[derive(Debug, Clone)]
@@ -32,6 +32,13 @@ impl Node {
         match self {
             Node::EventNode(event) => event.id,
             Node::ObjectNode(object) => object.id,
+        }
+    }
+
+    pub fn type_name(&self) -> String {
+        match self {
+            Node::EventNode(event) => event.event_type.clone(),
+            Node::ObjectNode(object) => object.object_type.clone(),
         }
     }
 }
@@ -88,6 +95,7 @@ pub struct CaseStats {
     pub query_event_counts: HashMap<String, usize>,
     pub query_object_counts: HashMap<String, usize>,
     pub query_edge_counts: HashMap<EdgeType, usize>,
+    pub edge_type_counts: HashMap<(EdgeType, usize, usize), usize>,
 }
 
 impl CaseStats {
@@ -109,8 +117,8 @@ impl CaseStats {
 // Define the CaseGraph structure
 #[derive(Debug, Clone)]
 pub struct CaseGraph {
-    pub nodes: HashMap<usize, Node>,       // Keyed by node ID
-    pub edges: HashMap<usize, Edge>,       // Keyed by edge ID
+    pub nodes: HashMap<usize, Node>,                  // Keyed by node ID
+    pub edges: HashMap<usize, Edge>,                  // Keyed by edge ID
     pub(crate) adjacency: HashMap<usize, Vec<usize>>, // from node ID -> Vec of edge IDs
     pub(crate) counter: usize,
 }
@@ -128,7 +136,7 @@ impl CaseGraph {
         self.counter += 1;
         self.counter
     }
-    
+
     // Add a node to the graph
     pub fn add_node(&mut self, node: Node) {
         let id = node.id();
@@ -142,6 +150,10 @@ impl CaseGraph {
         self.edges.insert(edge_id, edge);
         self.adjacency
             .entry(from)
+            .or_insert_with(Vec::new)
+            .push(edge_id);
+        self.adjacency
+            .entry(edge.to)
             .or_insert_with(Vec::new)
             .push(edge_id);
     }
@@ -203,42 +215,23 @@ impl CaseGraph {
         }
         edge_counts
     }
-    
-    pub fn count_edges_by_type_disticnt_e2o(&self) ->HashMap<(EdgeType,String,String), usize> {
+
+    pub fn count_edges_by_type_disticnt_e2o(&self) -> HashMap<(EdgeType, usize, usize), usize> {
         // edgetype is edgetype. if edge is e2o or o2o , string 1 ist from  type and string 2 is to type
         let mut edge_counts = HashMap::new();
+        let mut type_storage = TYPE_STORAGE.write().unwrap();
         for edge in self.edges.values() {
-            match edge.edge_type {
-                EdgeType::E2O => {
-                    let from = self.nodes.get(&edge.from).unwrap();
-                    let to = self.nodes.get(&edge.to).unwrap();
-                    let from_type = match from {
-                        Node::EventNode(event) => event.event_type.clone(),
-                        Node::ObjectNode(object) => object.object_type.clone(),
-                    };
-                    let to_type = match to {
-                        Node::EventNode(event) => event.event_type.clone(),
-                        Node::ObjectNode(object) => object.object_type.clone(),
-                    };
-                    *edge_counts.entry((EdgeType::E2O, from_type, to_type)).or_insert(0) += 1;
-                }
-                EdgeType::O2O => {
-                    let from = self.nodes.get(&edge.from).unwrap();
-                    let to = self.nodes.get(&edge.to).unwrap();
-                    let from_type = match from {
-                        Node::EventNode(event) => event.event_type.clone(),
-                        Node::ObjectNode(object) => object.object_type.clone(),
-                    };
-                    let to_type = match to {
-                        Node::EventNode(event) => event.event_type.clone(),
-                        Node::ObjectNode(object) => object.object_type.clone(),
-                    };
-                    *edge_counts.entry((EdgeType::O2O, from_type, to_type)).or_insert(0) += 1;
-                }
-                EdgeType::DF => {
-                    *edge_counts.entry((EdgeType::DF, "".to_string(), "".to_string())).or_insert(0) += 1;
-                }
-            }
+            let from_type = self.get_node(edge.from).unwrap().type_name();
+            let to_type = self.get_node(edge.to).unwrap().type_name();
+            *edge_counts
+                .entry((
+                    edge.edge_type,
+                    type_storage
+                        .get_type_id(from_type.as_str()),
+                    type_storage
+                        .get_type_id(to_type.as_str()),
+                ))
+                .or_insert(0) += 1;
         }
         edge_counts
     }
@@ -246,10 +239,12 @@ impl CaseGraph {
     pub fn get_case_stats(&self) -> CaseStats {
         let (query_event_counts, query_object_counts) = self.count_nodes_by_type();
         let query_edge_counts = self.count_edges_by_type();
+        let edge_type_counts = self.count_edges_by_type_disticnt_e2o();
         CaseStats {
             query_event_counts,
             query_object_counts,
             query_edge_counts,
+            edge_type_counts
         }
     }
 }
