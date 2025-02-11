@@ -131,17 +131,20 @@ impl SearchNodeAction {
     }
 }
 
+
 struct ModelCaseChecker {
     token_graph_id_mapping: HashMap<usize, usize>,
     reachability_cache: ReachabilityCache,
     model: Arc<ObjectCentricPetriNet>,
     shortest_case: Option<CaseGraph>,
+    model_transitions: HashSet<String>,
 }
 impl ModelCaseChecker {
     fn new(model: Arc<ObjectCentricPetriNet>) -> Self {
         ModelCaseChecker {
             token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
+            model_transitions: model.transitions.values().map(|t| t.name.clone()).collect(),
             model,
             shortest_case: None,
         }
@@ -151,6 +154,7 @@ impl ModelCaseChecker {
         ModelCaseChecker {
             token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
+            model_transitions: model.transitions.values().map(|t| t.name.clone()).collect(),
             model,
             shortest_case: Some(shortest_case),
         }
@@ -222,24 +226,37 @@ impl ModelCaseChecker {
         let mut global_lower_bound = 0.0;
         let mut best_node: Option<SearchNode> = None;
 
-        if(self.shortest_case.is_some()) {
+        let mut any_solution_found = false;
+
+        if let Some(shortest_case) = &self.shortest_case {
             println!("Calculating initial upper bound");
-            let alignment = CaseAlignment::align_mip(query_case, &self.shortest_case.as_ref().unwrap());
+            let alignment = CaseAlignment::align_mip(query_case, shortest_case);
             global_upper_bound = alignment.total_cost().unwrap_or(f64::INFINITY);
             println!("Initial upper bound: {}", global_upper_bound);
+
+
+            best_node = Some(SearchNode::new(
+                initial_marking.clone(),
+                shortest_case.clone(),
+                global_upper_bound,
+                None,
+                SearchNodeAction::VOID,
+            ));
         }
 
 
         let query_case_stats = query_case.get_case_stats();
         query_case_stats.pretty_print_stats();
 
-        let mut open_list: Vec<SearchNode> = vec![SearchNode::new(
+        let mut open_list: Vec<SearchNode> = vec![/*SearchNode::new(
             initial_marking,
             CaseGraph::new(),
             0.0,
             None,
             SearchNodeAction::VOID,
-        )];
+        )*/
+        self.initialize_node_with_initial_places(&query_case_stats, initial_marking.clone())
+        ];
         //println!("starting");
         let mut counter = 0;
         // save current time
@@ -253,7 +270,7 @@ impl ModelCaseChecker {
                 println!("Nodes explored: {}", counter);
                 println!("Open list length: {}", open_list.len());
                 println!("Current node min cost: {}", current_node.min_cost);
-                println!("Best node min cost: {}", global_upper_bound);
+                println!("Best node  cost: {}", global_upper_bound);
                 println!(
                     "Types in the net: {:?}",
                     self.model
@@ -264,7 +281,7 @@ impl ModelCaseChecker {
                 );
                 println!("---------------------");
                 current_node.partial_case_stats.pretty_print_stats();
-                
+
                 // save an intermediate result as an image in ./intermediates
                 let intermediate_graph = current_node.partial_case.clone();
                 let intermediate_alignment = CaseAlignment::align_mip(query_case, &intermediate_graph);
@@ -316,18 +333,21 @@ impl ModelCaseChecker {
                 let alignment = CaseAlignment::align_mip(query_case,&current_node.partial_case);
                 //println!("Alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
                 let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
-                println!("Final marking reached after exploring {} nodes", counter);
-                println!("Cost: {}", alignment_cost);
-                println!(
-                    "fired events: {:?}",
-                    current_node.partial_case_stats.query_event_counts
-                );
+                // println!("Final marking reached after exploring {} nodes", counter);
+                // println!("Cost: {}", alignment_cost);
+                // println!(
+                //     "fired events: {:?}",
+                //     current_node.partial_case_stats.query_event_counts
+                // );
                 //panic!("Final marking reached");
-
+                if(!any_solution_found) {
+                    any_solution_found = true;
+                    println!("First final marking reached")
+                }
                 // Limit the scope of the mutable borrow using a separate block
                 if alignment_cost < global_upper_bound {
                     // log that new best bound has been found
-                    println!("New best bound found: {}", alignment_cost);
+                    // println!("New best bound found: {}", alignment_cost);
 
                     global_upper_bound = alignment_cost;
                     best_node = Some(current_node.clone());
@@ -336,7 +356,7 @@ impl ModelCaseChecker {
                         .filter(|node| node.min_cost >= global_upper_bound)
                         .count();
 
-                    println!("Number of nodes pruned due to best bound: {}", len);
+                    // println!("Number of nodes pruned due to best bound: {}", len);
 
                     // remove all nodes that have a cost higher than the new upper bound
                     open_list.retain(|node| node.min_cost < global_upper_bound);
@@ -361,7 +381,7 @@ impl ModelCaseChecker {
             }
             //println!("sorting list");
             // now sort the open_list so that we expand first on the lowest min cost node
-            //open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+            open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
             if (open_list.len() == 0 && best_node.is_none()) {
                 println!("No solution found");
                 current_node.partial_case_stats.pretty_print_stats();
@@ -370,6 +390,7 @@ impl ModelCaseChecker {
         if (best_node.is_none()) {
             println!("No solution found after exploring {} nodes", counter);
         }
+        println!("Total nodes explored: {}", counter);
         best_node
     }
 
@@ -402,6 +423,14 @@ impl ModelCaseChecker {
                 .get(edge_type)
                 .unwrap_or(&0);
             total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
+        }
+
+        // for all events in the case but not in model transitions add cost of 1
+
+        for (event_type, &partial_count) in &query_case_stats.query_event_counts {
+            if !self.model_transitions.contains(event_type) {
+                total_cost += partial_count as f64;
+            }
         }
 
         total_cost
@@ -667,9 +696,9 @@ impl ModelCaseChecker {
 
             difference_a.partial_cmp(&difference_b).unwrap()
         });
-
-        children.append(&mut transition_children);
-        children
+        return transition_children
+        //children.append(&mut transition_children);
+        //children
     }
 }
 
@@ -683,7 +712,7 @@ mod tests {
     use graphviz_rust::cmd::Format;
     use std::fs;
     use std::path::Path;
-    use crate::oc_case::dummy_ocel_1_serialization::{json_to_case_graph, process_jsonocel_files};
+    use crate::oc_case::dummy_ocel_1_serialization::{json_to_case_graph, process_jsonocel_files, CaseGraphIterator};
 
     #[test]
     fn test_basic_alignment() {
@@ -782,7 +811,7 @@ mod tests {
 
     #[test]
     fn large_petri_net() {
-        let json_data = fs::read_to_string("./src/oc_petri_net/util/oc_petri_net.json").unwrap();
+        let json_data = fs::read_to_string("./src/oc_align/test_data/bpi17/oc_petri_net.json").unwrap();
         let ocpn = initialize_ocpn_from_json(&json_data);
 
         let initial_marking = Marking::new(ocpn.clone());
@@ -791,57 +820,36 @@ mod tests {
 
         // deserialize a query case from a json file
         // load file as string
-        let case_file =
-            fs::read_to_string("./src/oc_case/test_data/variant_6eb2da5f3f3f7ea94ca51f1a72de8f47.jsonocel")
-                .expect("Unable to read file");
 
-        let mut query_case = json_to_case_graph(case_file.as_str());
-
-
-        let initial_case_file = fs::read_to_string("./src/oc_align/test_data/p2p/case_graph.json")
+        let shortest_case_json = fs::read_to_string("./src/oc_align/test_data/bpi17/shortest_case_graph.json")
             .expect("Unable to read file");
-        let initial_case = deserialize_case_graph(initial_case_file.as_str());
+        let shortest_case = deserialize_case_graph(shortest_case_json.as_str());
 
         // Initialize ModelCaseChecker
-        let mut checker = ModelCaseChecker::new_with_shortest_case(petri_net_arc, initial_case);
+        let mut checker = ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(),shortest_case);
 
-        // Use branch_and_bound to find alignment
-        let result = checker.branch_and_bound(&query_case, initial_marking);
 
-        // Validate if a result is found
-        assert!(result.is_some(), "Failed to find a valid alignment");
+        let case_graph_iter = CaseGraphIterator::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi").unwrap();
+        let visualized_dir = Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
+        for (case_graph, path) in case_graph_iter {
+            let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
+            if let Some(result_node) = result {
+                println!("No solution found for case {:?}", path);
+                // save the alignment result as an image in a directory next to /Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi
+                let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
 
-        let best_node = result.unwrap();
-        let total_cost = best_node.min_cost;
+                let output_file_name = path.file_stem().unwrap().to_str().unwrap().to_owned() + ".png";
+                let output_path = visualized_dir.join(output_file_name);
 
-        let graph_json = serialize_case_graph(&best_node.partial_case);
-        // save that string to a file case_graph.json
-
-        fs::write("case_graph.json", graph_json).expect("Unable to write file");
-
-        export_case_graph_image(&query_case, "query_case_graph.png", Format::Png, Some(2.0))
-            .unwrap();
-
-        export_case_graph_image(
-            &best_node.partial_case,
-            "test_case_graph.png",
-            Format::Png,
-            Some(2.0),
-        )
-        .unwrap();
-
-        let alignment = CaseAlignment::align_mip(&query_case, &best_node.partial_case);
-        alignment.print_stats();
-        // print
-
-        export_c2_with_alignment_image(
-            &best_node.partial_case,
-            &alignment,
-            "c2_with_alignment.png",
-            Format::Png,
-            Some(2.0),
-        )
-        .expect("Failed to export visualization.");
+                export_c2_with_alignment_image(
+                    &result_node.partial_case,
+                    &alignment,
+                    output_path.to_str().unwrap(),
+                    Format::Png,
+                    Some(2.0),
+                ).unwrap();
+            }
+        }
     }
 
     #[test]

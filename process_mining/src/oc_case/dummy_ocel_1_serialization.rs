@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use graphviz_rust::cmd::Format;
 use crate::oc_case::case::{CaseGraph, Edge, EdgeType, Event, Node, Object};
 use crate::oc_case::visualization::export_case_graph_image;
+use serde_with::{serde_as, DisplayFromStr};
 
 #[derive(Debug, Deserialize)]
 struct OcelGlobalLog {
@@ -32,12 +33,16 @@ struct OcelGlobalObject {
     object_type: String,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize)]
 struct OcelEventVMap {
     #[serde(rename = "event_variant")]
     event_variant: Vec<u32>,
+
+    #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "event_id")]
     event_id: u32,
+
     #[serde(rename = "start_timestamp")]
     start_timestamp: String,
 }

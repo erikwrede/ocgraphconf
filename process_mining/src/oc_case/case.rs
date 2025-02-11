@@ -203,6 +203,45 @@ impl CaseGraph {
         }
         edge_counts
     }
+    
+    pub fn count_edges_by_type_disticnt_e2o(&self) ->HashMap<(EdgeType,String,String), usize> {
+        // edgetype is edgetype. if edge is e2o or o2o , string 1 ist from  type and string 2 is to type
+        let mut edge_counts = HashMap::new();
+        for edge in self.edges.values() {
+            match edge.edge_type {
+                EdgeType::E2O => {
+                    let from = self.nodes.get(&edge.from).unwrap();
+                    let to = self.nodes.get(&edge.to).unwrap();
+                    let from_type = match from {
+                        Node::EventNode(event) => event.event_type.clone(),
+                        Node::ObjectNode(object) => object.object_type.clone(),
+                    };
+                    let to_type = match to {
+                        Node::EventNode(event) => event.event_type.clone(),
+                        Node::ObjectNode(object) => object.object_type.clone(),
+                    };
+                    *edge_counts.entry((EdgeType::E2O, from_type, to_type)).or_insert(0) += 1;
+                }
+                EdgeType::O2O => {
+                    let from = self.nodes.get(&edge.from).unwrap();
+                    let to = self.nodes.get(&edge.to).unwrap();
+                    let from_type = match from {
+                        Node::EventNode(event) => event.event_type.clone(),
+                        Node::ObjectNode(object) => object.object_type.clone(),
+                    };
+                    let to_type = match to {
+                        Node::EventNode(event) => event.event_type.clone(),
+                        Node::ObjectNode(object) => object.object_type.clone(),
+                    };
+                    *edge_counts.entry((EdgeType::O2O, from_type, to_type)).or_insert(0) += 1;
+                }
+                EdgeType::DF => {
+                    *edge_counts.entry((EdgeType::DF, "".to_string(), "".to_string())).or_insert(0) += 1;
+                }
+            }
+        }
+        edge_counts
+    }
 
     pub fn get_case_stats(&self) -> CaseStats {
         let (query_event_counts, query_object_counts) = self.count_nodes_by_type();
