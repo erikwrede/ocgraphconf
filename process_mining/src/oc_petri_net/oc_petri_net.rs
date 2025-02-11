@@ -148,19 +148,17 @@ impl ObjectCentricPetriNet {
         self.places.get(id)
     }
 
-    pub fn get_initial_places(&self) -> Vec<Place> {
+    pub fn get_initial_places(&self) -> Vec<&Place> {
         self.places
             .values()
             .filter(|place| place.initial)
-            .cloned()
             .collect()
     }
 
-    pub fn get_final_places(&self) -> Vec<Place> {
+    pub fn get_final_places(&self) -> Vec<&Place> {
         self.places
             .values()
             .filter(|place| place.final_place)
-            .cloned()
             .collect()
     }
 

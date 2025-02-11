@@ -1,0 +1,568 @@
+{
+  "places": [
+    {
+      "id": 5245991440,
+      "name": "orders1",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245986064,
+      "name": "orders9",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245992592,
+      "name": "items2",
+      "object_type": "items",
+      "initial": true,
+      "final": false
+    },
+    {
+      "id": 5245984400,
+      "name": "items6",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245989392,
+      "name": "items8",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245981328,
+      "name": "items9",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245980432,
+      "name": "items10",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245988880,
+      "name": "orders3",
+      "object_type": "orders",
+      "initial": true,
+      "final": false
+    },
+    {
+      "id": 5245988240,
+      "name": "orders2",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245978832,
+      "name": "orders4",
+      "object_type": "orders",
+      "initial": false,
+      "final": true
+    },
+    {
+      "id": 5245990736,
+      "name": "orders5",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245985616,
+      "name": "orders6",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245986768,
+      "name": "orders7",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 4547315280,
+      "name": "items1",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245982416,
+      "name": "items4",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245989072,
+      "name": "items5",
+      "object_type": "items",
+      "initial": false,
+      "final": true
+    },
+    {
+      "id": 5245984720,
+      "name": "items3",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245980240,
+      "name": "items7",
+      "object_type": "items",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245978576,
+      "name": "orders8",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    },
+    {
+      "id": 5245979856,
+      "name": "orders10",
+      "object_type": "orders",
+      "initial": false,
+      "final": false
+    }
+  ],
+  "transitions": [
+    {
+      "id": 5245992528,
+      "name": "15082cee-4c51-4bac-a3ae-f7a0c6ef47e7",
+      "label": "15082cee-4c51-4bac-a3ae-f7a0c6ef47e7",
+      "silent": true
+    },
+    {
+      "id": 5245991568,
+      "name": "8bb6c1ca-fa6d-426d-b3ac-61f28edc8591",
+      "label": "8bb6c1ca-fa6d-426d-b3ac-61f28edc8591",
+      "silent": true
+    },
+    {
+      "id": 5245987792,
+      "name": "7b30b990-9ec7-4d93-b5c2-b096da48c647",
+      "label": "7b30b990-9ec7-4d93-b5c2-b096da48c647",
+      "silent": true
+    },
+    {
+      "id": 5245981904,
+      "name": "cc7ed061-6023-4b54-b4c8-38de1b12c0cf",
+      "label": "cc7ed061-6023-4b54-b4c8-38de1b12c0cf",
+      "silent": true
+    },
+    {
+      "id": 5245979536,
+      "name": "ca976cd5-1171-48ba-a4b5-8f23f6f9c750",
+      "label": "ca976cd5-1171-48ba-a4b5-8f23f6f9c750",
+      "silent": true
+    },
+    {
+      "id": 5245988816,
+      "name": "f07c0db1-302e-4afd-bae6-8f7e9ad60486",
+      "label": "f07c0db1-302e-4afd-bae6-8f7e9ad60486",
+      "silent": true
+    },
+    {
+      "id": 5245982672,
+      "name": "4feb3f0c-4355-4ade-908f-db2aeb44ae96",
+      "label": "place order",
+      "silent": false
+    },
+    {
+      "id": 5245982800,
+      "name": "b9644307-ed75-4529-90c3-4c286be5e934",
+      "label": "confirm order",
+      "silent": false
+    },
+    {
+      "id": 5245983120,
+      "name": "5dd645db-4aa6-4fc2-a664-03a630f63a99",
+      "label": "send package",
+      "silent": false
+    },
+    {
+      "id": 5245981136,
+      "name": "43d1f310-0c95-465c-96c2-63beebe5fd54",
+      "label": "43d1f310-0c95-465c-96c2-63beebe5fd54",
+      "silent": true
+    },
+    {
+      "id": 5245984464,
+      "name": "3de2434e-e0d7-4f14-b198-6379f7961016",
+      "label": "3de2434e-e0d7-4f14-b198-6379f7961016",
+      "silent": true
+    },
+    {
+      "id": 5245989776,
+      "name": "0bf34b71-984c-4628-a183-902c5a8e4425",
+      "label": "0bf34b71-984c-4628-a183-902c5a8e4425",
+      "silent": true
+    },
+    {
+      "id": 5245990352,
+      "name": "f030d0ba-34c8-44d5-ad42-f350d4b5784a",
+      "label": "payment reminder",
+      "silent": false
+    },
+    {
+      "id": 5245977360,
+      "name": "28ab9ef9-95e0-468d-8e1c-7f10e9e41ea0",
+      "label": "28ab9ef9-95e0-468d-8e1c-7f10e9e41ea0",
+      "silent": true
+    },
+    {
+      "id": 5245980304,
+      "name": "1652f1dd-a935-47aa-a534-309773439caf",
+      "label": "pay order",
+      "silent": false
+    },
+    {
+      "id": 5245979280,
+      "name": "bfd4a815-48af-4223-98b4-2a093f1203ef",
+      "label": "bfd4a815-48af-4223-98b4-2a093f1203ef",
+      "silent": true
+    }
+  ],
+  "input_arcs": [
+    {
+      "id": 5245992656,
+      "source": 5245986768,
+      "target": 5245982800,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245980368,
+      "source": 5245978576,
+      "target": 5245987792,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245982224,
+      "source": 4547315280,
+      "target": 5245977360,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245990544,
+      "source": 5245980432,
+      "target": 5245990352,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245981712,
+      "source": 5245984720,
+      "target": 5245983120,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245978384,
+      "source": 4547315280,
+      "target": 5245979280,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 4555244944,
+      "source": 5245981328,
+      "target": 5245980304,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245980944,
+      "source": 5245982416,
+      "target": 5245984464,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245976848,
+      "source": 5245989392,
+      "target": 5245981136,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245982992,
+      "source": 5245990736,
+      "target": 5245983120,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245978640,
+      "source": 5245979856,
+      "target": 5245980304,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245979664,
+      "source": 5245986064,
+      "target": 5245988816,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245981776,
+      "source": 5245985616,
+      "target": 5245991568,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245986000,
+      "source": 5245988880,
+      "target": 5245982672,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245992208,
+      "source": 5245986064,
+      "target": 5245979536,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245986128,
+      "source": 5245985616,
+      "target": 5245987792,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245980048,
+      "source": 5245991440,
+      "target": 5245981904,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245990608,
+      "source": 5245989392,
+      "target": 5245989776,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245981392,
+      "source": 5245992592,
+      "target": 5245982672,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245986896,
+      "source": 5245984400,
+      "target": 5245982800,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245984336,
+      "source": 5245980240,
+      "target": 5245984464,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245991248,
+      "source": 5245991440,
+      "target": 5245992528,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245989520,
+      "source": 5245988240,
+      "target": 5245990352,
+      "variable": false,
+      "weight": 1
+    }
+  ],
+  "output_arcs": [
+    {
+      "id": 5245984592,
+      "source": 5245982672,
+      "target": 5245990736,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245985552,
+      "source": 5245983120,
+      "target": 5245982416,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245988496,
+      "source": 5245984464,
+      "target": 5245989072,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245989264,
+      "source": 5245982672,
+      "target": 5245984720,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245991056,
+      "source": 5245980304,
+      "target": 5245980240,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245981008,
+      "source": 5245980304,
+      "target": 5245978576,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245991184,
+      "source": 5245991568,
+      "target": 5245990736,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245978768,
+      "source": 5245983120,
+      "target": 5245985616,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245977040,
+      "source": 5245990352,
+      "target": 5245986064,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245985872,
+      "source": 5245982672,
+      "target": 5245986768,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245977936,
+      "source": 5245987792,
+      "target": 5245978832,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245988368,
+      "source": 5245992528,
+      "target": 5245979856,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245978448,
+      "source": 5245979536,
+      "target": 5245979856,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245991760,
+      "source": 5245982800,
+      "target": 5245989392,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245985744,
+      "source": 5245990352,
+      "target": 4547315280,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 4700572112,
+      "source": 5245977360,
+      "target": 5245980432,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245977296,
+      "source": 5245981136,
+      "target": 5245981328,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245978704,
+      "source": 5245982672,
+      "target": 5245984400,
+      "variable": true,
+      "weight": 1
+    },
+    {
+      "id": 5245990096,
+      "source": 5245989776,
+      "target": 5245980432,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245989904,
+      "source": 5245979280,
+      "target": 5245981328,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245981840,
+      "source": 5245982800,
+      "target": 5245991440,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245988048,
+      "source": 5245981904,
+      "target": 5245988240,
+      "variable": false,
+      "weight": 1
+    },
+    {
+      "id": 5245982096,
+      "source": 5245988816,
+      "target": 5245988240,
+      "variable": false,
+      "weight": 1
+    }
+  ]
+}
