@@ -3,7 +3,7 @@ use serde_json;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use graphviz_rust::cmd::Format;
 use crate::oc_case::case::{CaseGraph, Edge, EdgeType, Event, Node, Object};
 use crate::oc_case::visualization::export_case_graph_image;
@@ -79,6 +79,51 @@ struct OcelLog {
     events: HashMap<String, OcelEvent>,
     #[serde(rename = "ocel:objects")]
     objects: HashMap<String, OcelObject>,
+}
+
+
+pub struct CaseGraphIterator {
+    entries: fs::ReadDir,
+}
+
+impl CaseGraphIterator {
+    pub fn new(source_dir: &str) -> Result<Self, Box<dyn Error>> {
+        let source_path = Path::new(source_dir);
+        let entries = fs::read_dir(source_path)?;
+        Ok(CaseGraphIterator { entries })
+    }
+}
+
+impl Iterator for CaseGraphIterator {
+    type Item = (CaseGraph, PathBuf);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(entry) = self.entries.next() {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jsonocel") {
+                        match fs::read_to_string(&path) {
+                            Ok(case_file) => {
+                                println!("Processing file: {}", path.display());
+                                let case_graph = json_to_case_graph(case_file.as_str());
+                                return Some((case_graph, path));
+                            }
+                            Err(err) => {
+                                eprintln!("Failed to read file {}: {}", path.display(), err);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Failed to read directory entry: {}", err);
+                    continue;
+                }
+            }
+        }
+        None
+    }
 }
 
 pub fn process_jsonocel_files(source_dir: &str) -> Result<(), Box<dyn Error>> {
