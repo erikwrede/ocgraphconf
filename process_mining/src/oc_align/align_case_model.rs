@@ -7,8 +7,8 @@ use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
 use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
 use crate::type_storage::TYPE_STORAGE;
 use graphviz_rust::cmd::Format;
-use std::cmp::PartialEq;
-use std::collections::{HashMap, HashSet};
+use std::cmp::{Ordering, PartialEq};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Not};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -22,6 +22,47 @@ struct SearchNode {
     action: SearchNodeAction,
     partial_case_stats: CaseStats,
 }
+
+
+// Wrapper struct to establish min-heap ordering
+struct OrderedSearchNode(SearchNode);
+
+impl PartialEq for OrderedSearchNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.min_cost == other.0.min_cost
+    }
+}
+
+impl Eq for OrderedSearchNode {}
+
+impl PartialOrd for OrderedSearchNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        // Reverse ordering for min-heap
+        other.0.min_cost.partial_cmp(&self.0.min_cost)
+    }
+}
+
+impl Ord for OrderedSearchNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse ordering for min-heap
+        other.0.min_cost.partial_cmp(&self.0.min_cost).unwrap()
+    }
+}
+
+// Implement From<SearchNode> for OrderedSearchNode
+impl From<SearchNode> for OrderedSearchNode {
+    fn from(node: SearchNode) -> OrderedSearchNode {
+        OrderedSearchNode(node)
+    }
+}
+
+// Implement From<OrderedSearchNode> for SearchNode
+impl From<OrderedSearchNode> for SearchNode {
+    fn from(ordered_node: OrderedSearchNode) -> SearchNode {
+        ordered_node.0
+    }
+}
+
 
 impl SearchNode {
     fn new(
@@ -268,27 +309,37 @@ impl ModelCaseChecker {
 
         let query_case_stats = query_case.get_case_stats();
         query_case_stats.pretty_print_stats();
-
-        let mut open_list: Vec<SearchNode> = vec![
-            /*SearchNode::new(
-                initial_marking,
-                CaseGraph::new(),
-                0.0,
-                None,
-                SearchNodeAction::VOID,
-            )*/
+        
+        let mut open_list : BinaryHeap<OrderedSearchNode> = BinaryHeap::new();
+        
+        open_list.push(
             self.initialize_node_with_initial_places(
                 &query_case_stats,
                 initial_marking.clone(),
                 static_void_cost,
-            ),
-        ];
+            ).into());
+        
+        // let mut open_list: Vec<SearchNode> = vec![
+        //     /*SearchNode::new(
+        //         initial_marking,
+        //         CaseGraph::new(),
+        //         0.0,
+        //         None,
+        //         SearchNodeAction::VOID,
+        //     )*/
+        //     self.initialize_node_with_initial_places(
+        //         &query_case_stats,
+        //         initial_marking.clone(),
+        //         static_void_cost,
+        //     ),
+        // ];
         //println!("starting");
         let mut counter = 0;
         let mut mip_counter = 0;
         // save current time
         let mut most_recent_timestamp = std::time::Instant::now();
         while let Some(mut current_node) = open_list.pop() {
+            let  current_node : SearchNode = current_node.into();
             counter += 1;
             // every 5 seconds print an update
             if most_recent_timestamp.elapsed().as_secs() >= 20 {
@@ -412,13 +463,13 @@ impl ModelCaseChecker {
                     best_node = Some(current_node.clone());
                     let len = open_list
                         .iter()
-                        .filter(|node| node.min_cost >= global_upper_bound)
+                        .filter(|node| node.0.min_cost >= global_upper_bound)
                         .count();
 
                     // println!("Number of nodes pruned due to best bound: {}", len);
 
                     // remove all nodes that have a cost higher than the new upper bound
-                    open_list.retain(|node| node.min_cost < global_upper_bound);
+                    open_list.retain(|node| node.0.min_cost < global_upper_bound);
                 }
             }
 
@@ -428,14 +479,14 @@ impl ModelCaseChecker {
                 for mut child in children {
                     if child.min_cost < global_upper_bound {
                         //child.action.log(self.model.clone());
-                        open_list.push(child);
+                        open_list.push(child.into());
                     } else {
                         ////println!("Pruned node before exploring with min cost: {}", child.min_cost);
                     }
                 }
             }
 
-            open_list.sort_by(|a, b| b.min_cost.partial_cmp(&a.min_cost).unwrap());
+            //open_list.sort_by(|a, b| b.min_cost.partial_cmp(&a.min_cost).unwrap());
             if (open_list.len() == 0 && best_node.is_none()) {
                 println!("No solution found");
                 current_node.partial_case_stats.pretty_print_stats();
@@ -787,7 +838,7 @@ impl ModelCaseChecker {
             }
             
             if(filtered_combinations.len() < firing_combinations.len()) {
-                println!("Filtered out {} combinations", firing_combinations.len() - filtered_combinations.len());
+                //println!("Filtered out {} combinations", firing_combinations.len() - filtered_combinations.len());
             }
             
             filtered_combinations.iter().for_each(|combination| {
