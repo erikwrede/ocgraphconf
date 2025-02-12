@@ -3,12 +3,13 @@ use crate::oc_align::util::reachability_cache::ReachabilityCache;
 use crate::oc_align::visualization::case_visual::export_c2_with_alignment_image;
 use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Object};
 use crate::oc_case::visualization::export_case_graph_image;
-use crate::oc_petri_net::marking::{Binding, Marking};
-use crate::oc_petri_net::oc_petri_net::ObjectCentricPetriNet;
+use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
+use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
 use crate::type_storage::TYPE_STORAGE;
 use graphviz_rust::cmd::Format;
 use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, Not};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -524,6 +525,118 @@ impl ModelCaseChecker {
 
         total_cost + unhittable_edges.len() as f64
     }
+    fn filter_firing_combinations<'a>(
+        &self,
+        firing_combinations: &'a [Binding],
+        transition: &Transition,
+        node: &SearchNode,
+    ) -> Vec<&'a Binding> {
+        // If the transition has variable arcs, retain all combinations
+        if transition.input_arcs.iter().any(|arc| arc.variable) {
+            return firing_combinations.iter().collect();
+        }
+
+        // Map of object_type to its sorted list of unused tokens
+        let mut unused_objects_per_type: HashMap<String, Vec<&OCToken>> = HashMap::new();
+
+        // Determine all object types involved in this transition
+        // Assuming a method `get_object_types_for_transition` exists
+
+        let object_types = firing_combinations
+            .get(0)
+            .unwrap()
+            .object_binding_info
+            .keys()
+            .collect::<Vec<_>>();
+
+        for object_type in object_types {
+            // Retrieve all tokens of this object type from all bindings
+            let all_tokens: HashSet<&OCToken> = firing_combinations
+                .iter()
+                .flat_map(|binding| {
+                    binding
+                        .object_binding_info
+                        .get(object_type)
+                        .map_or(Vec::new(), |binding_info| {
+                            binding_info.tokens.iter().collect()
+                        })
+                })
+                .collect();
+
+            // Determine which tokens are already used (have adjacent edges)
+            let used_tokens: HashSet<&OCToken> = all_tokens
+                .iter()
+                .filter_map(|token| {
+                    let obj_id = self.token_graph_id_mapping.get(&token.id).unwrap();
+                    let adj_edges = node.partial_case.adjacency.get(obj_id);
+
+                    match adj_edges {
+                        Some(edges) => {
+                            if edges.is_empty() {
+                                None
+                            } else {
+                                Some(*token)
+                            }
+                        }
+                        None => None,
+                    }
+                })
+                .collect();
+
+            // Identify unused tokens
+            let unused_tokens: Vec<&OCToken> = all_tokens
+                .iter()
+                .filter_map(|token| {
+                    if !used_tokens.contains(*token) {
+                        Some(*token)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Sort the unused tokens by ID to find the lowest
+            let mut sorted_unused_tokens = unused_tokens.clone();
+            sorted_unused_tokens.sort_by_key(|token| token.id);
+
+            unused_objects_per_type.insert(object_type.clone(), sorted_unused_tokens);
+        }
+
+        // Now, filter the firing combinations
+        firing_combinations
+            .iter()
+            .filter(|combination| {
+                // For each object type in the combination, apply the following:
+                combination
+                    .object_binding_info
+                    .iter()
+                    .all(|(object_type, binding_info)| {
+                        // Assuming each binding_info has exactly one token
+                        let token = binding_info.tokens.first().unwrap();
+                        let object_id = self.token_graph_id_mapping.get(&token.id).unwrap();
+
+                        // Check if the object is already used
+                        let is_used = !node
+                            .partial_case
+                            .adjacency
+                            .get(object_id)
+                            .map_or(true, |edges| edges.is_empty());
+
+                        if is_used {
+                            // If the object is already used, any is allowed
+                            return true;
+                        } else {
+                            // Find the lowest unused token for this object type
+                            let unused_tokens = unused_objects_per_type.get(object_type).unwrap();
+                            // The lowest unused token is the first in the sorted list
+                            let lowest_unused = unused_tokens.first().unwrap();
+                            // Ensure that this combination includes the lowest unused token^    ^
+                            return token.id == lowest_unused.id;
+                        }
+                    })
+            })
+            .collect()
+    }
 
     fn generate_children<'a>(
         &mut self,
@@ -660,7 +773,24 @@ impl ModelCaseChecker {
 
             transition_enabled.insert(transition.id, firing_combinations.len() > 0);
 
-            firing_combinations.iter().for_each(|combination| {
+            if firing_combinations.is_empty() {
+                continue;
+            }
+
+            // Filter combinations based on symmetry breaking
+            let filtered_combinations=
+                self.filter_firing_combinations(&firing_combinations, transition, node);
+
+            
+            if(filtered_combinations.is_empty()) {
+                panic!("No filtered combinations?!");
+            }
+            
+            if(filtered_combinations.len() < firing_combinations.len()) {
+                println!("Filtered out {} combinations", firing_combinations.len() - filtered_combinations.len());
+            }
+            
+            filtered_combinations.iter().for_each(|combination| {
                 let mut new_marking = node.marking.clone();
                 let mut new_partial_case = node.partial_case.clone();
 
@@ -749,8 +879,8 @@ impl ModelCaseChecker {
                     &new_partial_case_stats,
                     static_cost,
                 );
-                
-                if(new_cost < node.min_cost) {
+
+                if (new_cost < node.min_cost) {
                     println!("!!!!! COST DECREASED WTF")
                 }
 
@@ -759,7 +889,7 @@ impl ModelCaseChecker {
                     new_partial_case,
                     new_cost,
                     most_recent_event_id,
-                    SearchNodeAction::fire_transition(transition.id, combination.clone()),
+                    SearchNodeAction::fire_transition(transition.id, combination.clone().clone()),
                     new_partial_case_stats,
                 ));
             });
@@ -987,7 +1117,8 @@ mod tests {
                 export_c2_with_alignment_image(
                     &result_node.partial_case,
                     &alignment,
-                    output_path.to_str().unwrap().to_owned() + format!("_aligned_cost_{}.png", cost).as_str(),
+                    output_path.to_str().unwrap().to_owned()
+                        + format!("_aligned_cost_{}.png", cost).as_str(),
                     Format::Png,
                     Some(2.0),
                 )
