@@ -434,7 +434,7 @@ impl ModelCaseChecker {
                 }
             }
 
-            open_list.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+            open_list.sort_by(|a, b| b.min_cost.partial_cmp(&a.min_cost).unwrap());
             if (open_list.len() == 0 && best_node.is_none()) {
                 println!("No solution found");
                 current_node.partial_case_stats.pretty_print_stats();
@@ -749,6 +749,10 @@ impl ModelCaseChecker {
                     &new_partial_case_stats,
                     static_cost,
                 );
+                
+                if(new_cost < node.min_cost) {
+                    println!("!!!!! COST DECREASED WTF")
+                }
 
                 transition_children.push(SearchNode::new_with_stats(
                     new_marking,
