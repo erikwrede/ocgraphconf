@@ -15,6 +15,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
@@ -165,46 +167,60 @@ fn run_controller(
                 case_graph.display()
             )
         })?;
-
         let start_time = Instant::now();
 
         // Set timeout of 2.5 hours
         let timeout = Duration::from_secs(2 * 60 * 60 + 30 * 60); // 2.5 hours
 
+        // Open the log file and wrap it in an Arc<Mutex<>> for thread-safe access
+        let log_file = File::create(&log_path)?;
+        let log_file = Arc::new(Mutex::new(log_file));
+
+        // Clone references for the threads
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("Failed to capture stderr"))?;
+        let log_file_stdout = Arc::clone(&log_file);
+        let log_file_stderr = Arc::clone(&log_file);
+
+        // Spawn a thread to handle stdout
+        let stdout_thread = thread::spawn(move || -> Result<()> {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                let line = line?;
+                println!("{}", line);
+                let mut log = log_file_stdout.lock().unwrap();
+                writeln!(log, "{}", line)?;
+            }
+            Ok(())
+        });
+
+        // Spawn a thread to handle stderr
+        let stderr_thread = thread::spawn(move || -> Result<()> {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let line = line?;
+                eprintln!("{}", line);
+                let mut log = log_file_stderr.lock().unwrap();
+                writeln!(log, "stderr: {}", line)?;
+            }
+            Ok(())
+        });
+
         // Use wait_timeout to wait with timeout
         match child.wait_timeout(timeout)? {
             Some(status) => {
+                // Wait for the stdout and stderr threads to finish
+                stdout_thread.join().expect("Failed to join stdout thread")?;
+                stderr_thread.join().expect("Failed to join stderr thread")?;
+
                 if status.success() {
-                    // Worker succeeded, capture stdout
-                    let stdout = child
-                        .stdout
-                        .take()
-                        .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
-                    let reader = BufReader::new(stdout);
-                    let mut log_file = File::create(&log_path)?;
-                    for line in reader.lines() {
-                        let line = line?;
-                        println!("{}", line);
-                        writeln!(log_file, "{}", line)?;
-                    }
-
-                    // Capture stderr
-                    if let Some(stderr) = child.stderr.take() {
-                        let reader = BufReader::new(stderr);
-                        for line in reader.lines() {
-                            let line = line?;
-                            eprintln!("{}", line);
-                            writeln!(log_file, "stderr: {}", line)?;
-                        }
-                    }
-
-                    // Read the stats from stdout
-                    // Assuming the worker outputs JSON at the end
-                    // Here, since we already wrote all stdout to log, we need another way
-                    // A better approach is to have the worker write the stats to separate file
-                    // or output to stdout explicitly
-
-                    // For simplicity, let's assume the worker writes the stats to a file
+                    // Read the stats from the temporary file
                     let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
                     if temp_stats_path.exists() {
                         let stats_content = fs::read_to_string(&temp_stats_path)?;
@@ -231,8 +247,9 @@ fn run_controller(
                         case_graph.display()
                     );
                     // Write to log
-                    let mut log_file = File::create(&log_path)?;
-                    writeln!(log_file, "Worker exited with status {:?}", status)?;
+                    let mut log = log_file.lock().unwrap();
+                    writeln!(log, "Worker exited with status {:?}", status)?;
+
                     // Write stats with error
                     let stats = CaseStats {
                         duration_seconds: start_time.elapsed().as_secs_f64(),
@@ -251,12 +268,13 @@ fn run_controller(
                     case_graph.display()
                 );
                 // Write to log
-                let mut log_file = File::create(&log_path)?;
+                let mut log = log_file.lock().unwrap();
                 writeln!(
-                    log_file,
+                    log,
                     "Worker timed out after {:.2} seconds",
                     timeout.as_secs_f64()
                 )?;
+
                 // Write stats with timeout
                 let stats = CaseStats {
                     duration_seconds: timeout.as_secs_f64(),
@@ -270,7 +288,6 @@ fn run_controller(
 
     Ok(())
 }
-
 /// Worker function to process a single case graph
 fn run_worker(
     petri_net: &Path,
@@ -280,7 +297,7 @@ fn run_worker(
 ) -> Result<()> {
     // Start timing
     let start_time = Instant::now();
-
+    println!("Hello from worker!");
     // Initialize ModelCaseChecker
     // Assuming these functions and structs are defined elsewhere in your project
     let json_data =
