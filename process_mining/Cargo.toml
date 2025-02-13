@@ -25,9 +25,12 @@ flate2 = "1.0"
 graphviz-rust = { git = "https://github.com/aarkue/graphviz-rust.git" , optional = true}
 rusqlite = { version = "0.32.1", features = ["bundled","chrono", "serialize"], optional = true }
 polars = {version = "0.43.1", features = ["dtype-slim","timezones","partition_by"], optional = true}
+hashbag = "0.1.12"
+russcip = { version = "0.4.1",features = ["from-source"]}
+lazy_static = "1.5.0"
 
 [features]
-
+default = ["graphviz-export"]
 # Enables exporting Petri nets as PNG/SVG/... images using graphviz.
 # Note: graphviz needs to be locally installed to the PATH for the image export functions to work.
 graphviz-export = ["dep:graphviz-rust"] 
