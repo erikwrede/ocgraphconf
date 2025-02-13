@@ -1,385 +1,409 @@
-use clap::{ArgGroup, Parser, Subcommand};
+use anyhow::{anyhow, Context, Result};
+use clap::{Parser, Subcommand};
 use graphviz_rust::cmd::Format;
-use log::{error, info, LevelFilter};
 use process_mining::oc_align::align_case::CaseAlignment;
 use process_mining::oc_align::align_case_model::ModelCaseChecker;
 use process_mining::oc_align::visualization::case_visual::export_c2_with_alignment_image;
-use process_mining::oc_case::dummy_ocel_1_serialization::CaseGraphIterator;
+use process_mining::oc_case::dummy_ocel_1_serialization::json_to_case_graph;
 use process_mining::oc_case::serialization::deserialize_case_graph;
 use process_mining::oc_case::visualization::export_case_graph_image;
 use process_mining::oc_petri_net::initialize_ocpn_from_json;
 use process_mining::oc_petri_net::marking::Marking;
-use serde::Deserialize;
-use simplelog::{Config as LogConfig, WriteLogger};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::Instant,
-};
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
 
-/// Command-line arguments for the application
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-#[command(group(
-    ArgGroup::new("mode")
-        .required(true)
-        .args(&["controller", "worker"]),
-))]
-struct Args {
-    /// Run in controller mode
-    #[arg(short, long, group = "mode")]
-    controller: bool,
-
-    /// Run in worker mode
-    #[arg(short, long, group = "mode")]
-    worker: bool,
-
-    /// Input directory containing the Petri net and case graphs
-    #[arg(short, long, required(false))] // Required only for controller
-    input_dir: Option<String>,
-
-    /// Output directory for logs and results
-    #[arg(short, long, required(false))] // Required only for controller
-    output_dir: Option<String>,
-
-    /// Path to the Petri net JSON file relative to input_dir
-    #[arg(short = 'p', long, default_value = "oc_petri_net.json")]
-    petri_net_file: String,
-
-    /// Path to the shortest case JSON file relative to input_dir
-    #[arg(short = 's', long, default_value = "shortest_case_graph.json")]
-    shortest_case_file: String,
-
-    /// Path to the case graphs directory relative to input_dir
-    #[arg(short = 'c', long, default_value = "problemkinder/crash")]
-    case_graph_dir: String,
-
-    /// Case name to process (only for worker)
-    #[arg(short = 'n', long, required(false))] // Required only for worker
-    case_name: Option<String>,
-
-    /// Path to the specific case file to process (only for worker)
-    #[arg(short = 'f', long, required(false))] // Required only for worker
-    case_file: Option<String>,
+/// CLI tool for rigorously testing the branch and bound function on multiple case graphs.
+#[derive(Parser)]
+#[command(name = "oc_aligner")]
+#[command(version = "1.0")]
+#[command(author = "Your Name <youremail@example.com>")]
+#[command(about = "Processes case graphs with branch and bound", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-fn main() {
-    let args = Args::parse();
+#[derive(Subcommand)]
+enum Commands {
+    /// Controller subcommand to manage and run workers
+    Controller {
+        /// JSON folder with all case graphs
+        #[arg(short, long, value_name = "JSON_FOLDER")]
+        json_folder: String,
 
-    if args.controller {
-        run_controller(args);
-    } else if args.worker {
-        run_worker(args);
-    }
+        /// Path to the petri net JSON file
+        #[arg(short, long, value_name = "PETRI_NET")]
+        petri_net: String,
+
+        /// Path to the smallest case graph JSON file
+        #[arg(short = 's', long, value_name = "SMALLEST_CASE")]
+        smallest_case: String,
+
+        /// Output folder
+        #[arg(short, long, value_name = "OUTPUT_DIR")]
+        output_dir: String,
+    },
+    /// Worker subcommand to process a single case graph
+    Worker {
+        /// Path to the petri net JSON file
+        #[arg(short, long, value_name = "PETRI_NET")]
+        petri_net: String,
+
+        /// Path to the smallest case graph JSON file
+        #[arg(short = 's', long, value_name = "SMALLEST_CASE")]
+        smallest_case: String,
+
+        /// Path to the case graph JSON file
+        #[arg(short, long, value_name = "CASE_GRAPH")]
+        case_graph: String,
+
+        /// Output folder
+        #[arg(short, long, value_name = "OUTPUT_DIR")]
+        output_dir: String,
+    },
 }
 
-/// Controller Functionality
-fn run_controller(args: Args) {
-    // Validate required arguments
-    let input_dir = match args.input_dir {
-        Some(dir) => Path::new(&dir).to_owned(),
-        None => {
-            eprintln!("Controller mode requires --input_dir");
-            std::process::exit(1);
-        }
-    };
+#[derive(Serialize, Deserialize)]
+struct CaseStats {
+    duration_seconds: f64,
+    alignment_cost: f64,
+}
 
-    let output_dir = match args.output_dir {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            eprintln!("Controller mode requires --output_dir");
-            std::process::exit(1);
-        }
-    };
+fn main() -> Result<()> {
+    let cli = Cli::parse();
 
-    // Initialize global logging
-    let log_file = output_dir.join("controller.log");
-    if let Err(e) = fs::create_dir_all(&output_dir) {
-        eprintln!("Failed to create output directory {:?}: {}", output_dir, e);
-        std::process::exit(1);
+    match &cli.command {
+        Commands::Controller {
+            json_folder,
+            petri_net,
+            smallest_case,
+            output_dir,
+        } => {
+            run_controller(
+                Path::new(json_folder),
+                Path::new(petri_net),
+                Path::new(smallest_case),
+                Path::new(output_dir),
+            )?;
+        }
+        Commands::Worker {
+            petri_net,
+            smallest_case,
+            case_graph,
+            output_dir,
+        } => {
+            run_worker(
+                Path::new(petri_net),
+                Path::new(smallest_case),
+                Path::new(case_graph),
+                Path::new(output_dir),
+            )?;
+        }
     }
 
-    if let Err(e) = WriteLogger::init(
-        LevelFilter::Info,
-        LogConfig::default(),
-        fs::File::create(&log_file).unwrap(),
-    ) {
-        eprintln!("Failed to initialize logger: {}", e);
-        std::process::exit(1);
-    }
+    Ok(())
+}
 
-    info!(
-        "Starting controller with input_dir: {:?}, output_dir: {:?}",
-        input_dir, output_dir
+/// Controller function to manage worker processes
+fn run_controller(
+    json_folder: &Path,
+    petri_net: &Path,
+    smallest_case: &Path,
+    output_dir: &Path,
+) -> Result<()> {
+    // Ensure output directory exists
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory {:?}", output_dir))?;
+
+    // Iterate over case graph files
+    let case_graph_files = find_case_graph_files(json_folder)?;
+
+    println!(
+        "Found {} case graph files to process.",
+        case_graph_files.len()
     );
 
-    // Initialize CaseGraphIterator
-    let case_graph_dir = input_dir.join(&args.case_graph_dir);
-    let case_graph_iter = match CaseGraphIterator::new(&case_graph_dir.to_str().unwrap()) {
-        Ok(iter) => iter,
-        Err(e) => {
-            error!("Failed to initialize CaseGraphIterator: {}", e);
-            std::process::exit(1);
-        }
-    };
+    // Iterate sequentially
+    for case_graph in case_graph_files {
+        let file_stem = case_graph
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| anyhow!("Invalid file stem for {:?}", case_graph))?
+            .to_owned();
 
-    // Prepare visualized directory (Ensure it's created for workers)
-    let visualized_dir = output_dir.join("varsbpi_visualized");
-    if let Err(e) = fs::create_dir_all(&visualized_dir) {
-        error!(
-            "Failed to create visualized directory {:?}: {}",
-            visualized_dir, e
-        );
-        std::process::exit(1);
-    }
+        println!("Processing case graph: {}", case_graph.display());
 
-    // Iterate over each case and spawn a worker process
-    for (case_graph, path) in case_graph_iter {
-        let case_name = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(name) => name.to_owned(),
-            None => {
-                error!("Invalid case file name: {:?}", path);
-                continue;
-            }
-        };
+        // Define log and stats file paths
+        let log_path = output_dir.join(format!("{}.log", file_stem));
+        let stats_path = output_dir.join(format!("{}.json", file_stem));
 
-        info!("Spawning worker for case: {}", case_name);
-
-        // Prepare paths
-        let case_file = match path.to_str() {
-            Some(s) => s.to_owned(),
-            None => {
-                error!("Failed to convert case file path to string: {:?}", path);
-                continue;
-            }
-        };
-
-        let worker_executable = match std::env::current_exe() {
-            Ok(exe) => exe,
-            Err(e) => {
-                error!("Failed to get current executable path: {}", e);
-                continue;
-            }
-        };
+        // Prepare the command to run the worker
+        let current_exe = std::env::current_exe()?;
+        let mut cmd = Command::new(current_exe);
+        cmd.arg("worker")
+            .arg("--petri-net")
+            .arg(petri_net)
+            .arg("-s")
+            .arg(smallest_case)
+            .arg("--case-graph")
+            .arg(&case_graph)
+            .arg("--output-dir")
+            .arg(output_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         // Spawn the worker process
-        let status = Command::new(worker_executable)
-            .arg("--worker")
-            .arg("--input_dir")
-            .arg(input_dir.to_str().unwrap())
-            .arg("--output_dir")
-            .arg(output_dir.to_str().unwrap())
-            .arg("--petri_net_file")
-            .arg(&args.petri_net_file)
-            .arg("--shortest_case_file")
-            .arg(&args.shortest_case_file)
-            .arg("--case_graph_dir")
-            .arg(&args.case_graph_dir)
-            .arg("--case_name")
-            .arg(&case_name)
-            .arg("--case_file")
-            .arg(&case_file)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .status();
+        let mut child = cmd.spawn().with_context(|| {
+            format!(
+                "Failed to spawn worker for case graph {}",
+                case_graph.display()
+            )
+        })?;
 
-        match status {
-            Ok(status) => {
+        let start_time = Instant::now();
+
+        // Set timeout of 2.5 hours
+        let timeout = Duration::from_secs(2 * 60 * 60 + 30 * 60); // 2.5 hours
+
+        // Use wait_timeout to wait with timeout
+        match child.wait_timeout(timeout)? {
+            Some(status) => {
                 if status.success() {
-                    info!("Worker succeeded for case: {}", case_name);
-                } else {
-                    error!(
-                        "Worker failed for case: {} with status: {}",
-                        case_name, status
+                    // Worker succeeded, capture stdout
+                    let stdout = child
+                        .stdout
+                        .take()
+                        .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
+                    let reader = BufReader::new(stdout);
+                    let mut log_file = File::create(&log_path)?;
+                    for line in reader.lines() {
+                        let line = line?;
+                        println!("{}", line);
+                        writeln!(log_file, "{}", line)?;
+                    }
+
+                    // Capture stderr
+                    if let Some(stderr) = child.stderr.take() {
+                        let reader = BufReader::new(stderr);
+                        for line in reader.lines() {
+                            let line = line?;
+                            eprintln!("{}", line);
+                            writeln!(log_file, "stderr: {}", line)?;
+                        }
+                    }
+
+                    // Read the stats from stdout
+                    // Assuming the worker outputs JSON at the end
+                    // Here, since we already wrote all stdout to log, we need another way
+                    // A better approach is to have the worker write the stats to separate file
+                    // or output to stdout explicitly
+
+                    // For simplicity, let's assume the worker writes the stats to a file
+                    let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
+                    if temp_stats_path.exists() {
+                        let stats_content = fs::read_to_string(&temp_stats_path)?;
+                        let stats: CaseStats = serde_json::from_str(&stats_content)?;
+                        fs::rename(temp_stats_path, &stats_path)?;
+                    } else {
+                        return Err(anyhow!(
+                            "Worker did not produce stats file for case {}",
+                            file_stem
+                        ));
+                    }
+
+                    let duration = start_time.elapsed();
+                    println!(
+                        "Completed case {} in {:.2} seconds with cost {}",
+                        file_stem,
+                        duration.as_secs_f64(),
+                        stats_path.to_str().unwrap()
                     );
+                } else {
+                    eprintln!(
+                        "Worker exited with status {:?} for case {}",
+                        status,
+                        case_graph.display()
+                    );
+                    // Write to log
+                    let mut log_file = File::create(&log_path)?;
+                    writeln!(log_file, "Worker exited with status {:?}", status)?;
+                    // Write stats with error
+                    let stats = CaseStats {
+                        duration_seconds: start_time.elapsed().as_secs_f64(),
+                        alignment_cost: f64::INFINITY, // Indicate failure
+                    };
+                    let stats_json = serde_json::to_string(&stats)?;
+                    fs::write(&stats_path, stats_json)?;
                 }
             }
-            Err(e) => {
-                error!("Failed to spawn worker for case {}: {}", case_name, e);
+            None => {
+                // Timeout expired, kill the process
+                child.kill()?;
+                eprintln!(
+                    "Worker timed out after {:.2} seconds for case {}",
+                    timeout.as_secs_f64(),
+                    case_graph.display()
+                );
+                // Write to log
+                let mut log_file = File::create(&log_path)?;
+                writeln!(
+                    log_file,
+                    "Worker timed out after {:.2} seconds",
+                    timeout.as_secs_f64()
+                )?;
+                // Write stats with timeout
+                let stats = CaseStats {
+                    duration_seconds: timeout.as_secs_f64(),
+                    alignment_cost: f64::INFINITY, // Indicate failure
+                };
+                let stats_json = serde_json::to_string(&stats)?;
+                fs::write(&stats_path, stats_json)?;
             }
         }
     }
 
-    info!("All cases have been dispatched to workers.");
+    Ok(())
 }
 
-/// Worker Functionality
-fn run_worker(args: Args) {
-    // Validate required arguments
-    let input_dir = match args.input_dir {
-        Some(dir) => Path::new(&dir).to_owned(),
-        None => {
-            eprintln!("Worker mode requires --input_dir");
-            std::process::exit(1);
-        }
-    };
-
-    let output_dir = match args.output_dir {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            eprintln!("Worker mode requires --output_dir");
-            std::process::exit(1);
-        }
-    };
-
-    let case_name = match args.case_name {
-        Some(name) => name,
-        None => {
-            eprintln!("Worker mode requires --case_name");
-            std::process::exit(1);
-        }
-    };
-
-    let case_file = match args.case_file {
-        Some(file) => file,
-        None => {
-            eprintln!("Worker mode requires --case_file");
-            std::process::exit(1);
-        }
-    };
-
-    // Each worker initializes its own logger
-    let visualized_dir = output_dir.join("varsbpi_visualized");
-    if let Err(e) = fs::create_dir_all(&visualized_dir) {
-        eprintln!(
-            "Failed to create visualized directory {:?}: {}",
-            visualized_dir, e
-        );
-        std::process::exit(1);
-    }
-    let case_log_file = visualized_dir.join(format!("{}.log", case_name));
-
-    if let Err(e) = WriteLogger::init(
-        LevelFilter::Info,
-        LogConfig::default(),
-        fs::File::create(&case_log_file).unwrap(),
-    ) {
-        eprintln!("Failed to initialize logger for case {}: {}", case_name, e);
-        std::process::exit(1);
-    }
-
-    info!("Starting worker for case: {}", case_name);
-
-    // Read and initialize Petri net
-    let petri_net_path = input_dir.join(&args.petri_net_file);
-    let json_data = match fs::read_to_string(&petri_net_path) {
-        Ok(data) => data,
-        Err(e) => {
-            error!("Failed to read Petri net file {:?}: {}", petri_net_path, e);
-            std::process::exit(1);
-        }
-    };
-    let ocpn =  initialize_ocpn_from_json(&json_data);
-    let initial_marking = Marking::new(Arc::new(ocpn.clone()));
-
-    // Deserialize the shortest case
-    let shortest_case_path = input_dir.join(&args.shortest_case_file);
-    let shortest_case_json = match fs::read_to_string(&shortest_case_path) {
-        Ok(data) => data,
-        Err(e) => {
-            error!(
-                "Failed to read shortest case file {:?}: {}",
-                shortest_case_path, e
-            );
-            std::process::exit(1);
-        }
-    };
-    let shortest_case =  deserialize_case_graph(&shortest_case_json);
-
-    // Initialize ModelCaseChecker
-    let petri_net_arc = Arc::new(ocpn);
-    let mut checker =
-        ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
-
-    // Load the specific case graph
-    let case_graph_json = match fs::read_to_string(&case_file) {
-        Ok(data) => data,
-        Err(e) => {
-            error!("Failed to read case file {:?}: {}", case_file, e);
-            std::process::exit(1);
-        }
-    };
-    let case_graph =  deserialize_case_graph(&case_graph_json);
-
+/// Worker function to process a single case graph
+fn run_worker(
+    petri_net: &Path,
+    smallest_case: &Path,
+    case_graph: &Path,
+    output_dir: &Path,
+) -> Result<()> {
     // Start timing
     let start_time = Instant::now();
 
-    // Prepare output paths
-    let output_file_base = visualized_dir.join(&case_name);
+    // Initialize ModelCaseChecker
+    // Assuming these functions and structs are defined elsewhere in your project
+    let json_data =
+        fs::read_to_string(petri_net).with_context(|| format!("Reading {:?}", petri_net))?;
+    let ocpn = initialize_ocpn_from_json(&json_data);
 
-    // Process the case
-    // Removed `std::panic::catch_unwind` as all initialization and processing are within the worker
-    // Any panic here will terminate the worker process without affecting the controller
-    // This ensures the controller remains stable regardless of worker failures
-    {
-        // Export the query case image
-        if let Err(e) = export_case_graph_image(
-            &case_graph,
-            &(output_file_base.to_str().unwrap().to_owned() + "_query.png"),
+    let petri_net_arc = std::sync::Arc::new(ocpn);
+    let initial_marking = Marking::new(petri_net_arc.clone());
+
+    let shortest_case_json = fs::read_to_string(smallest_case)
+        .with_context(|| format!("Reading {:?}", smallest_case))?;
+    let shortest_case = deserialize_case_graph(&shortest_case_json);
+
+    let mut checker =
+        ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
+
+    // Read the specific case graph
+    let case_file = fs::read_to_string(case_graph)
+        .with_context(|| format!("Reading case graph {:?}", case_graph))?;
+    // Save image of the query case
+    // file stem is the name of the input file without extension
+    let file_stem = case_graph
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| anyhow!("Invalid file stem for {:?}", case_graph))?;
+    let case_graph = json_to_case_graph(&case_file);
+
+    let visualized_dir = output_dir.join("visualized");
+    fs::create_dir_all(&visualized_dir)?;
+
+    let query_image_path = visualized_dir.join(format!("{}_query.png", file_stem));
+    export_case_graph_image(
+        &case_graph,
+        query_image_path.to_str().unwrap().to_owned(),
+        Format::Png,
+        Some(2.0),
+    )?;
+
+    // Run branch_and_bound
+    let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
+
+    if let Some(result_node) = result {
+        println!("Solution found for case {:?}", file_stem);
+
+        // Align and calculate cost
+        let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
+        let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
+
+        // Save aligned image
+        let aligned_image_path =
+            visualized_dir.join(format!("{}_aligned_cost_{}.png", file_stem, cost));
+        export_c2_with_alignment_image(
+            &result_node.partial_case,
+            &alignment,
+            aligned_image_path.to_str().unwrap().to_owned(),
             Format::Png,
             Some(2.0),
-        ) {
-            error!("Failed to export query case image: {}", e);
-            std::process::exit(1);
-        }
+        )?;
 
-        // Run branch and bound
-        let branch_result = checker.branch_and_bound(&case_graph, initial_marking.clone());
+        // Save target image
+        let target_image_path = visualized_dir.join(format!("{}_target.png", file_stem));
+        export_case_graph_image(
+            &result_node.partial_case,
+            target_image_path.to_str().unwrap().to_owned(),
+            Format::Png,
+            Some(2.0),
+        )?;
 
-        if let Some(result_node) = branch_result {
-            info!("Solution found for case {}", case_name);
+        // Prepare stats
+        let duration = start_time.elapsed().as_secs_f64();
+        let stats = CaseStats {
+            duration_seconds: duration,
+            alignment_cost: cost,
+        };
 
-            // Align the case
-            let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
-            let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
+        // Write stats to a temporary file (to be renamed by controller)
+        let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
+        let stats_json = serde_json::to_string(&stats)?;
+        fs::write(&temp_stats_path, stats_json)?;
 
-            // Export alignment images
-            if let Err(e) = export_c2_with_alignment_image(
-                &result_node.partial_case,
-                &alignment,
-                &(output_file_base.to_str().unwrap().to_owned()
-                    + &format!("_aligned_cost_{}.png", cost)),
-                Format::Png,
-                Some(2.0),
-            ) {
-                error!("Failed to export alignment image: {}", e);
-                std::process::exit(1);
-            }
+        println!(
+            "Case {} processed in {:.2} seconds with cost {}",
+            file_stem, duration, cost
+        );
+    } else {
+        println!("No solution found for case {:?}", file_stem);
 
-            if let Err(e) = export_case_graph_image(
-                &result_node.partial_case,
-                &(output_file_base.to_str().unwrap().to_owned() + "_target.png"),
-                Format::Png,
-                Some(2.0),
-            ) {
-                error!("Failed to export target case graph image: {}", e);
-                std::process::exit(1);
-            }
+        // Prepare stats with infinity cost
+        let duration = start_time.elapsed().as_secs_f64();
+        let stats = CaseStats {
+            duration_seconds: duration,
+            alignment_cost: f64::INFINITY,
+        };
 
-            // Log alignment details
-            info!(
-                "Case: {}\nAlignment Cost: {}\nAlignment Details: {:?}",
-                case_name, cost, alignment
-            );
-        } else {
-            info!("No solution found for case {}", case_name);
-            info!("Case: {}\nNo solution found.", case_name);
-        }
+        // Write stats to a temporary file
+        let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
+        let stats_json = serde_json::to_string(&stats)?;
+        fs::write(&temp_stats_path, stats_json)?;
+
+        println!(
+            "Case {} processed in {:.2} seconds with no solution.",
+            file_stem, duration
+        );
     }
 
-    // Stop timing and log duration
-    let duration = start_time.elapsed();
-    info!(
-        "Finished processing case: {} in {:.2?}",
-        case_name, duration
-    );
-    info!(
-        "Case: {}\nProcessing Time: {:.2?}",
-        case_name, duration
-    );
+    Ok(())
+}
 
-    // Exit with success
-    std::process::exit(0);
+/// Finds all `.jsonocel` files in the given directory
+fn find_case_graph_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("Reading directory {:?}", dir))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(OsStr::to_str)
+                .map(|ext| ext.eq_ignore_ascii_case("jsonocel"))
+                .unwrap_or(false)
+        {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
