@@ -14,10 +14,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
-struct SearchNode {
+pub struct SearchNode {
     marking: Marking,
-    partial_case: CaseGraph,
-    min_cost: f64,
+    pub partial_case: CaseGraph,
+    pub min_cost: f64,
     most_recent_event_id: Option<usize>,
     action: SearchNodeAction,
     partial_case_stats: CaseStats,
@@ -174,7 +174,7 @@ impl SearchNodeAction {
     }
 }
 
-struct ModelCaseChecker {
+pub struct ModelCaseChecker {
     token_graph_id_mapping: HashMap<usize, usize>,
     reachability_cache: ReachabilityCache,
     model: Arc<ObjectCentricPetriNet>,
@@ -182,7 +182,7 @@ struct ModelCaseChecker {
     model_transitions: HashSet<String>,
 }
 impl ModelCaseChecker {
-    fn new(model: Arc<ObjectCentricPetriNet>) -> Self {
+    pub fn new(model: Arc<ObjectCentricPetriNet>) -> Self {
         ModelCaseChecker {
             token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
@@ -192,7 +192,7 @@ impl ModelCaseChecker {
         }
     }
 
-    fn new_with_shortest_case(model: Arc<ObjectCentricPetriNet>, shortest_case: CaseGraph) -> Self {
+    pub fn new_with_shortest_case(model: Arc<ObjectCentricPetriNet>, shortest_case: CaseGraph) -> Self {
         ModelCaseChecker {
             token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
@@ -267,7 +267,7 @@ impl ModelCaseChecker {
         )
     }
 
-    fn branch_and_bound<'a>(
+    pub fn branch_and_bound<'a>(
         &mut self,
         query_case: &'a CaseGraph,
         initial_marking: Marking,
@@ -346,7 +346,7 @@ impl ModelCaseChecker {
                 most_recent_timestamp = std::time::Instant::now();
                 println!("===================== Progress update =====================");
                 println!("Nodes explored: {}", counter);
-                println!("Nodes algined: {}", mip_counter);
+                println!("Nodes aligned: {}", mip_counter);
                 println!("Open list length: {}", open_list.len());
                 println!("Current node min cost: {}", current_node.min_cost);
                 println!("Global Upper Bound: {}", global_upper_bound);
@@ -361,22 +361,22 @@ impl ModelCaseChecker {
                     "Intermediate alignment cost: {}",
                     intermediate_alignment.total_cost().unwrap_or(f64::INFINITY)
                 );
-                export_case_graph_image(
-                    &intermediate_graph,
-                    format!("./intermediates/intermediate_{}_case.png", counter).as_str(),
-                    Format::Png,
-                    Some(2.0),
-                )
-                .unwrap();
+                // export_case_graph_image(
+                //     &intermediate_graph,
+                //     format!("./intermediates/intermediate_{}_case.png", counter).as_str(),
+                //     Format::Png,
+                //     Some(2.0),
+                // )
+                // .unwrap();
 
-                export_c2_with_alignment_image(
-                    &intermediate_graph,
-                    &intermediate_alignment,
-                    format!("./intermediates/intermediate_{}_alignment.png", counter).as_str(),
-                    Format::Png,
-                    Some(2.0),
-                )
-                .unwrap();
+                // export_c2_with_alignment_image(
+                //     &intermediate_graph,
+                //     &intermediate_alignment,
+                //     format!("./intermediates/intermediate_{}_alignment.png", counter).as_str(),
+                //     Format::Png,
+                //     Some(2.0),
+                // )
+                // .unwrap();
             }
             if (counter >= 800000) && false {
                 println!("No solution found");
@@ -407,6 +407,10 @@ impl ModelCaseChecker {
             let generate_children = true;
             if current_node.marking.is_final_has_tokens() {
                 mip_counter += 1;
+                if (!any_solution_found) {
+                    any_solution_found = true;
+                    println!("First final marking reached")
+                }
                 // temporarily throw an error here so everything is stopped
                 // now output a lot of info such as a string repr of the current case we found and the cost etc
                 let alignment = CaseAlignment::align_mip(query_case, &current_node.partial_case);
@@ -450,10 +454,6 @@ impl ModelCaseChecker {
                 //     current_node.partial_case_stats.query_event_counts
                 // );
                 //panic!("Final marking reached");
-                if (!any_solution_found) {
-                    any_solution_found = true;
-                    println!("First final marking reached")
-                }
                 // Limit the scope of the mutable borrow using a separate block
                 if alignment_cost < global_upper_bound {
                     // log that new best bound has been found
@@ -1023,7 +1023,7 @@ mod tests {
     use crate::oc_case::visualization::export_case_graph_image;
     use crate::oc_petri_net::initialize_ocpn_from_json;
     use graphviz_rust::cmd::Format;
-    use std::fs;
+    use std::{fs, panic};
     use std::path::Path;
 
     #[test]
@@ -1055,10 +1055,10 @@ mod tests {
         petri_net.add_output_arc(t1.id, p2.id, false, 1);
         petri_net.add_input_arc(p2.id, t2.id, false, 1);
         petri_net.add_output_arc(t2.id, p3.id, false, 1);
-
-        let initial_marking = Marking::new(petri_net.clone());
         // Wrap the petri net in Arc to match branch_and_bound signature
         let petri_net_arc = Arc::new(petri_net);
+
+        let initial_marking = Marking::new(petri_net_arc.clone());
 
         // Create a CaseGraph representing the query case
         let mut query_case = CaseGraph::new();
@@ -1123,67 +1123,72 @@ mod tests {
 
     #[test]
     fn large_petri_net() {
-        let json_data =
-            fs::read_to_string("./src/oc_align/test_data/bpi17/oc_petri_net.json").unwrap();
-        let ocpn = initialize_ocpn_from_json(&json_data);
+        let result = panic::catch_unwind(|| {
+            let json_data =
+                fs::read_to_string("./src/oc_align/test_data/bpi17/oc_petri_net.json").unwrap();
+            let ocpn = initialize_ocpn_from_json(&json_data);
 
-        let initial_marking = Marking::new(ocpn.clone());
-        // Wrap the petri net in Arc to match branch_and_bound signature
-        let petri_net_arc = Arc::new(ocpn);
+            // Wrap the petri net in Arc to match branch_and_bound signature
+            let petri_net_arc = Arc::new(ocpn);
+            let initial_marking = Marking::new(petri_net_arc.clone());
 
-        // deserialize a query case from a json file
-        // load file as string
+            // deserialize a query case from a json file
+            // load file as string
 
-        let shortest_case_json =
-            fs::read_to_string("./src/oc_align/test_data/bpi17/shortest_case_graph.json")
-                .expect("Unable to read file");
-        let shortest_case = deserialize_case_graph(shortest_case_json.as_str());
+            let shortest_case_json =
+                fs::read_to_string("./src/oc_align/test_data/bpi17/shortest_case_graph.json")
+                    .expect("Unable to read file");
+            let shortest_case = deserialize_case_graph(shortest_case_json.as_str());
 
-        // Initialize ModelCaseChecker
-        let mut checker =
-            ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
+            // Initialize ModelCaseChecker
+            let mut checker =
+                ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
-        let case_graph_iter =
-            CaseGraphIterator::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi").unwrap();
-        let visualized_dir =
-            Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
-        for (case_graph, path) in case_graph_iter {
-            let output_file_name = path.file_stem().unwrap().to_str().unwrap().to_owned();
-            let output_path = visualized_dir.join(output_file_name);
+            let case_graph_iter =
+                CaseGraphIterator::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/crash").unwrap();
+            let visualized_dir =
+                Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
+            for (case_graph, path) in case_graph_iter {
+                let output_file_name = path.file_stem().unwrap().to_str().unwrap().to_owned();
+                let output_path = visualized_dir.join(output_file_name);
 
-            export_case_graph_image(
-                &case_graph,
-                output_path.to_str().unwrap().to_owned() + "_query.png",
-                Format::Png,
-                Some(2.0),
-            )
-            .unwrap();
-
-            let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
-            if let Some(result_node) = result {
-                println!("Solution found for case {:?}", path);
-                // save the alignment result as an image in a directory next to /Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi
-                let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
-                let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
-                export_c2_with_alignment_image(
-                    &result_node.partial_case,
-                    &alignment,
-                    output_path.to_str().unwrap().to_owned()
-                        + format!("_aligned_cost_{}.png", cost).as_str(),
+                export_case_graph_image(
+                    &case_graph,
+                    output_path.to_str().unwrap().to_owned() + "_query.png",
                     Format::Png,
                     Some(2.0),
                 )
-                .unwrap();
+                    .unwrap();
 
-                export_case_graph_image(
-                    &result_node.partial_case,
-                    output_path.to_str().unwrap().to_owned() + "_target.png",
-                    Format::Png,
-                    Some(2.0),
-                );
-            } else {
-                println!("No solution found for case {:?}", path);
+                let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
+                if let Some(result_node) = result {
+                    println!("Solution found for case {:?}", path);
+                    // save the alignment result as an image in a directory next to /Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi
+                    let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
+                    let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
+                    export_c2_with_alignment_image(
+                        &result_node.partial_case,
+                        &alignment,
+                        output_path.to_str().unwrap().to_owned()
+                            + format!("_aligned_cost_{}.png", cost).as_str(),
+                        Format::Png,
+                        Some(2.0),
+                    )
+                        .unwrap();
+
+                    export_case_graph_image(
+                        &result_node.partial_case,
+                        output_path.to_str().unwrap().to_owned() + "_target.png",
+                        Format::Png,
+                        Some(2.0),
+                    );
+                } else {
+                    println!("No solution found for case {:?}", path);
+                }
             }
+        });
+        if result.is_err() { 
+            println!("Error: {:?}", result.err());
         }
     }
 
@@ -1227,9 +1232,9 @@ mod tests {
         petri_net.add_input_arc(p2.id, t3.id, true, 1);
         petri_net.add_output_arc(t3.id, p4.id, false, 1);
 
-        let initial_marking = Marking::new(petri_net.clone());
         // Wrap the petri net in Arc
         let petri_net_arc = Arc::new(petri_net);
+        let initial_marking = Marking::new(petri_net_arc.clone());
 
         // Create a CaseGraph representing the query case (missing optional path)
         let mut query_case = CaseGraph::new();

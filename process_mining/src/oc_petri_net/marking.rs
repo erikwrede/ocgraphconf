@@ -30,9 +30,9 @@ pub struct Marking {
 }
 
 impl Marking {
-    pub fn new(petri_net: ObjectCentricPetriNet) -> Self {
+    pub fn new(petri_net: Arc<ObjectCentricPetriNet>) -> Self {
         Marking {
-            petri_net: petri_net.into(),
+            petri_net: petri_net,
             assignments: HashMap::new(),
         }
     }

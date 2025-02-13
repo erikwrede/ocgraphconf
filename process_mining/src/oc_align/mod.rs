@@ -1,5 +1,5 @@
-mod align_case;
+pub mod align_case;
 
-mod align_case_model;
+pub mod align_case_model;
 pub mod util;
-mod visualization;
+pub mod visualization;
