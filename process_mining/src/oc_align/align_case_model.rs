@@ -21,8 +21,8 @@ pub struct SearchNode {
     most_recent_event_id: Option<usize>,
     action: SearchNodeAction,
     partial_case_stats: CaseStats,
+    depth: usize,
 }
-
 
 // Wrapper struct to establish min-heap ordering
 struct OrderedSearchNode(SearchNode);
@@ -63,7 +63,6 @@ impl From<OrderedSearchNode> for SearchNode {
     }
 }
 
-
 impl SearchNode {
     fn new(
         marking: Marking,
@@ -79,6 +78,7 @@ impl SearchNode {
             min_cost,
             most_recent_event_id,
             action,
+            depth: 0,
         }
     }
 
@@ -90,6 +90,7 @@ impl SearchNode {
         most_recent_event_id: Option<usize>,
         action: SearchNodeAction,
         partial_case_stats: CaseStats,
+        depth: usize,
     ) -> Self {
         SearchNode {
             marking,
@@ -98,6 +99,7 @@ impl SearchNode {
             min_cost,
             most_recent_event_id,
             action,
+            depth,
         }
     }
 }
@@ -192,7 +194,10 @@ impl ModelCaseChecker {
         }
     }
 
-    pub fn new_with_shortest_case(model: Arc<ObjectCentricPetriNet>, shortest_case: CaseGraph) -> Self {
+    pub fn new_with_shortest_case(
+        model: Arc<ObjectCentricPetriNet>,
+        shortest_case: CaseGraph,
+    ) -> Self {
         ModelCaseChecker {
             token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
@@ -309,16 +314,18 @@ impl ModelCaseChecker {
 
         let query_case_stats = query_case.get_case_stats();
         query_case_stats.pretty_print_stats();
-        
-        let mut open_list : BinaryHeap<OrderedSearchNode> = BinaryHeap::new();
-        
+
+        let mut open_list: BinaryHeap<OrderedSearchNode> = BinaryHeap::with_capacity(60000000);
+
         open_list.push(
             self.initialize_node_with_initial_places(
                 &query_case_stats,
                 initial_marking.clone(),
                 static_void_cost,
-            ).into());
-        
+            )
+            .into(),
+        );
+
         // let mut open_list: Vec<SearchNode> = vec![
         //     /*SearchNode::new(
         //         initial_marking,
@@ -339,10 +346,10 @@ impl ModelCaseChecker {
         // save current time
         let mut most_recent_timestamp = std::time::Instant::now();
         while let Some(mut current_node) = open_list.pop() {
-            let  current_node : SearchNode = current_node.into();
+            let current_node: SearchNode = current_node.into();
             counter += 1;
             // every 5 seconds print an update
-            if most_recent_timestamp.elapsed().as_secs() >= 20 {
+            if most_recent_timestamp.elapsed().as_secs() >= 5 {
                 most_recent_timestamp = std::time::Instant::now();
                 println!("===================== Progress update =====================");
                 println!("Nodes explored: {}", counter);
@@ -351,7 +358,57 @@ impl ModelCaseChecker {
                 println!("Current node min cost: {}", current_node.min_cost);
                 println!("Global Upper Bound: {}", global_upper_bound);
                 println!("---------------------");
+                println!("Current node partial case stats:");
                 current_node.partial_case_stats.pretty_print_stats();
+                println!("---------------------");
+                println!("Query Case Stats:");
+                query_case_stats.pretty_print_stats();
+                println!("---------------------");
+                println!("Stats difference");
+                // for each hashmap entry print the difference like in calculate_min_cost
+                for (event_type, &partial_count) in
+                    &current_node.partial_case_stats.query_event_counts
+                {
+                    let query_count = query_case_stats
+                        .query_event_counts
+                        .get(event_type)
+                        .unwrap_or(&0);
+                    println!(
+                        "Event: {} Difference: {}",
+                        event_type,
+                        (partial_count as f64 - *query_count as f64)
+                    );
+                }
+                // for each edge do the same
+                for ((edge_type, a, b), &partial_count) in
+                    &current_node.partial_case_stats.edge_type_counts
+                {
+                    let query_count = query_case_stats
+                        .edge_type_counts
+                        .get(&(*edge_type, *a, *b))
+                        .unwrap_or(&0);
+                    let type_storage = TYPE_STORAGE.read().unwrap();
+                    println!(
+                        "Edge: ({:?},{},{}) Difference: {}",
+                        edge_type,
+                        type_storage.get_type_name(*a).unwrap(),
+                        type_storage.get_type_name(*b).unwrap(),
+                        (partial_count as f64 - *query_count as f64)
+                    );
+                }
+
+                // print number of tokens in initial places of the current node marking
+                let initial_place_names: Vec<String> = self
+                    .model
+                    .get_initial_places()
+                    .iter()
+                    .map(|p| p.object_type.clone())
+                    .collect::<HashSet<_>>() // Remove duplicates
+                    .into_iter()
+                    .collect();
+                let counts = current_node.marking.get_initial_counts_per_type();
+                println!("Tokens in initial places: {:?}", counts);
+                println!("depth: {}", current_node.depth);
 
                 // save an intermediate result as an image in ./intermediates
                 let intermediate_graph = current_node.partial_case.clone();
@@ -361,13 +418,13 @@ impl ModelCaseChecker {
                     "Intermediate alignment cost: {}",
                     intermediate_alignment.total_cost().unwrap_or(f64::INFINITY)
                 );
-                // export_case_graph_image(
-                //     &intermediate_graph,
-                //     format!("./intermediates/intermediate_{}_case.png", counter).as_str(),
-                //     Format::Png,
-                //     Some(2.0),
-                // )
-                // .unwrap();
+                export_case_graph_image(
+                    &intermediate_graph,
+                    format!("./intermediates_4/intermediate_{}_case.png", counter).as_str(),
+                    Format::Png,
+                    Some(0.75),
+                )
+                .unwrap();
 
                 // export_c2_with_alignment_image(
                 //     &intermediate_graph,
@@ -801,6 +858,7 @@ impl ModelCaseChecker {
                         None,
                         SearchNodeAction::add_token(place.id.clone()),
                         new_partial_case_stats,
+                        node.depth + 1,
                     ));
                 }
                 // If higher_types_used is true, do not add tokens to this and lower types
@@ -829,18 +887,17 @@ impl ModelCaseChecker {
             }
 
             // Filter combinations based on symmetry breaking
-            let filtered_combinations=
+            let filtered_combinations =
                 self.filter_firing_combinations(&firing_combinations, transition, node);
 
-            
-            if(filtered_combinations.is_empty()) {
+            if (filtered_combinations.is_empty()) {
                 panic!("No filtered combinations?!");
             }
-            
-            if(filtered_combinations.len() < firing_combinations.len()) {
+
+            if (filtered_combinations.len() < firing_combinations.len()) {
                 //println!("Filtered out {} combinations", firing_combinations.len() - filtered_combinations.len());
             }
-            
+
             filtered_combinations.iter().for_each(|combination| {
                 let mut new_marking = node.marking.clone();
                 let mut new_partial_case = node.partial_case.clone();
@@ -942,6 +999,7 @@ impl ModelCaseChecker {
                     most_recent_event_id,
                     SearchNodeAction::fire_transition(transition.id, combination.clone().clone()),
                     new_partial_case_stats,
+                    node.depth + 1,
                 ));
             });
         }
@@ -1023,8 +1081,8 @@ mod tests {
     use crate::oc_case::visualization::export_case_graph_image;
     use crate::oc_petri_net::initialize_ocpn_from_json;
     use graphviz_rust::cmd::Format;
-    use std::{fs, panic};
     use std::path::Path;
+    use std::{fs, panic};
 
     #[test]
     fn test_basic_alignment() {
@@ -1144,27 +1202,30 @@ mod tests {
             let mut checker =
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
-            let case_graph_iter =
-                CaseGraphIterator::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/crash").unwrap();
+            let case_graph_iter = CaseGraphIterator::new(
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/crash",
+            )
+            .unwrap();
             let visualized_dir =
                 Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
             for (case_graph, path) in case_graph_iter {
                 let output_file_name = path.file_stem().unwrap().to_str().unwrap().to_owned();
                 let output_path = visualized_dir.join(output_file_name);
 
-                export_case_graph_image(
+                /*                export_case_graph_image(
                     &case_graph,
                     output_path.to_str().unwrap().to_owned() + "_query.png",
                     Format::Png,
                     Some(2.0),
                 )
-                    .unwrap();
+                    .unwrap();*/
 
                 let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
                 if let Some(result_node) = result {
                     println!("Solution found for case {:?}", path);
                     // save the alignment result as an image in a directory next to /Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi
-                    let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
+                    let alignment =
+                        CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
                     let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
                     export_c2_with_alignment_image(
                         &result_node.partial_case,
@@ -1174,7 +1235,7 @@ mod tests {
                         Format::Png,
                         Some(2.0),
                     )
-                        .unwrap();
+                    .unwrap();
 
                     export_case_graph_image(
                         &result_node.partial_case,
@@ -1187,7 +1248,7 @@ mod tests {
                 }
             }
         });
-        if result.is_err() { 
+        if result.is_err() {
             println!("Error: {:?}", result.err());
         }
     }
