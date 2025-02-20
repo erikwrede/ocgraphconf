@@ -21,6 +21,7 @@ pub struct SearchNode {
     most_recent_event_id: Option<usize>,
     action: SearchNodeAction,
     partial_case_stats: CaseStats,
+    forbidden_firings: Option<HashMap<Uuid, Vec<Binding>>>,
     depth: usize,
 }
 
@@ -79,6 +80,7 @@ impl SearchNode {
             most_recent_event_id,
             action,
             depth: 0,
+            forbidden_firings: None,
         }
     }
 
@@ -91,6 +93,7 @@ impl SearchNode {
         action: SearchNodeAction,
         partial_case_stats: CaseStats,
         depth: usize,
+        forbidden_firings: Option<HashMap<Uuid, Vec<Binding>>>,
     ) -> Self {
         SearchNode {
             marking,
@@ -100,6 +103,7 @@ impl SearchNode {
             most_recent_event_id,
             action,
             depth,
+            forbidden_firings,
         }
     }
 }
@@ -859,6 +863,7 @@ impl ModelCaseChecker {
                         SearchNodeAction::add_token(place.id.clone()),
                         new_partial_case_stats,
                         node.depth + 1,
+                        None,
                     ));
                 }
                 // If higher_types_used is true, do not add tokens to this and lower types
@@ -871,6 +876,10 @@ impl ModelCaseChecker {
         //
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
 
+        let mut firing_combinations_per_transition: HashMap<Uuid, Vec<Binding>> = HashMap::new();
+
+        let mut forbidden_firings_per_transition: HashMap<Uuid, Vec<Binding>> = HashMap::new();
+
         let mut transition_children: Vec<SearchNode> = Vec::new();
         for transition in self.model.transitions.values() {
             //println!("Transition: {}", transition.name);
@@ -881,7 +890,32 @@ impl ModelCaseChecker {
             }
 
             transition_enabled.insert(transition.id, firing_combinations.len() > 0);
+            firing_combinations_per_transition.insert(transition.id, firing_combinations.clone());
 
+            if (!transition.silent) {
+                forbidden_firings_per_transition.insert(transition.id, firing_combinations);
+            }
+        }
+
+        if let Some(forbidden_firings_previous) = &node.forbidden_firings {
+            // if this is the case, merge forbidden_firings_per_transition with forbidden_firings_previous
+            for (transition_id, forbidden_firings) in forbidden_firings_previous {
+                let forbidden_firings = forbidden_firings_per_transition
+                    .entry(*transition_id)
+                    .or_insert_with(|| vec![]);
+                forbidden_firings.extend(
+                    forbidden_firings_previous
+                        .get(transition_id)
+                        .unwrap()
+                        .clone(),
+                );
+            }
+        }
+
+        for transition in self.model.transitions.values() {
+            let firing_combinations = firing_combinations_per_transition
+                .get(&transition.id)
+                .unwrap();
             if firing_combinations.is_empty() {
                 continue;
             }
@@ -898,110 +932,150 @@ impl ModelCaseChecker {
                 //println!("Filtered out {} combinations", firing_combinations.len() - filtered_combinations.len());
             }
 
-            filtered_combinations.iter().for_each(|combination| {
-                let mut new_marking = node.marking.clone();
-                let mut new_partial_case = node.partial_case.clone();
+            // filter out forbidden firings, meaning filter out all bindings from filteredCombinations that are in searchNode.forbiddenFirings
 
-                let mut most_recent_event_id = node.most_recent_event_id.clone();
-
-                new_marking.fire_transition(transition, combination);
-                let mut new_partial_case_stats = node.partial_case_stats.clone();
-
-                if (!transition.silent) {
-                    let event_id = new_partial_case.get_new_id();
-                    let new_event = Node::EventNode(Event {
-                        id: event_id,
-                        event_type: transition.name.clone(),
-                    });
-                    new_partial_case.add_node(new_event);
-
-                    let mut type_storage = TYPE_STORAGE.write().unwrap();
-
-                    combination
-                        .object_binding_info
-                        .values()
-                        .for_each(|binding_info| {
-                            binding_info.tokens.iter().for_each(|token| {
-                                let e20_edge_id = new_partial_case.get_new_id();
-                                new_partial_case.add_edge(Edge::new(
-                                    e20_edge_id,
-                                    event_id,
-                                    self.token_graph_id_mapping.get(&token.id).unwrap().clone(),
-                                    EdgeType::E2O,
-                                ));
-                                new_partial_case_stats
-                                    .query_edge_counts
-                                    .entry(EdgeType::E2O)
-                                    .and_modify(|e| *e += 1)
-                                    .or_insert(1);
-
-                                let a = type_storage.get_type_id(transition.name.as_str());
-                                let b = type_storage.get_type_id(binding_info.object_type.as_str());
-
-                                *new_partial_case_stats
-                                    .edge_type_counts
-                                    .entry((EdgeType::E2O, a, b))
-                                    .or_insert(0) += 1;
+            let filtered_forbidden_combinations = match &node.forbidden_firings {
+                Some(forbidden_firings_per_t) => {
+                    let forbidden_firings = forbidden_firings_per_t.get(&transition.id);
+                    if (forbidden_firings.is_none()) {
+                        filtered_combinations.clone()
+                    } else {
+                        let forbidden_firings = forbidden_firings.unwrap();
+                        filtered_combinations
+                            .iter()
+                            .filter_map(|&combination| {
+                                if (forbidden_firings.contains(combination)) {
+                                    return None;
+                                }
+                                return Some(combination);
                             })
-                        });
+                            .collect::<Vec<&Binding>>()
+                    }
+                }
+                None => filtered_combinations.clone(),
+            };
+            let filtered_out_len = filtered_combinations.len() - filtered_forbidden_combinations.len();
+            if(filtered_out_len > 0) {
+                //println!("Filtered out {} forbidden combinations", filtered_out_len);
+            }
 
-                    let df_edge_id = new_partial_case.get_new_id();
-                    if let Some(prev_event_id) = node.most_recent_event_id {
-                        new_partial_case.add_edge(Edge::new(
-                            df_edge_id,
-                            prev_event_id,
-                            event_id,
-                            EdgeType::DF,
-                        ));
+            filtered_forbidden_combinations
+                .iter()
+                .for_each(|combination| {
+                    let mut new_marking = node.marking.clone();
+                    let mut new_partial_case = node.partial_case.clone();
+
+                    let mut most_recent_event_id = node.most_recent_event_id.clone();
+
+                    new_marking.fire_transition(transition, combination);
+                    let mut new_partial_case_stats = node.partial_case_stats.clone();
+
+                    if (!transition.silent) {
+                        let event_id = new_partial_case.get_new_id();
+                        let new_event = Node::EventNode(Event {
+                            id: event_id,
+                            event_type: transition.name.clone(),
+                        });
+                        new_partial_case.add_node(new_event);
+
+                        let mut type_storage = TYPE_STORAGE.write().unwrap();
+
+                        combination
+                            .object_binding_info
+                            .values()
+                            .for_each(|binding_info| {
+                                binding_info.tokens.iter().for_each(|token| {
+                                    let e20_edge_id = new_partial_case.get_new_id();
+                                    new_partial_case.add_edge(Edge::new(
+                                        e20_edge_id,
+                                        event_id,
+                                        self.token_graph_id_mapping.get(&token.id).unwrap().clone(),
+                                        EdgeType::E2O,
+                                    ));
+                                    new_partial_case_stats
+                                        .query_edge_counts
+                                        .entry(EdgeType::E2O)
+                                        .and_modify(|e| *e += 1)
+                                        .or_insert(1);
+
+                                    let a = type_storage.get_type_id(transition.name.as_str());
+                                    let b =
+                                        type_storage.get_type_id(binding_info.object_type.as_str());
+
+                                    *new_partial_case_stats
+                                        .edge_type_counts
+                                        .entry((EdgeType::E2O, a, b))
+                                        .or_insert(0) += 1;
+                                })
+                            });
+
+                        let df_edge_id = new_partial_case.get_new_id();
+                        if let Some(prev_event_id) = node.most_recent_event_id {
+                            new_partial_case.add_edge(Edge::new(
+                                df_edge_id,
+                                prev_event_id,
+                                event_id,
+                                EdgeType::DF,
+                            ));
+                            new_partial_case_stats
+                                .query_edge_counts
+                                .entry(EdgeType::DF)
+                                .and_modify(|e| *e += 1)
+                                .or_insert(1);
+
+                            let a = type_storage.get_type_id(
+                                &new_partial_case
+                                    .get_node(prev_event_id)
+                                    .unwrap()
+                                    .type_name(),
+                            );
+                            let b = type_storage.get_type_id(transition.name.as_str());
+
+                            *new_partial_case_stats
+                                .edge_type_counts
+                                .entry((EdgeType::DF, a, b))
+                                .or_insert(0) += 1;
+                        }
+
                         new_partial_case_stats
-                            .query_edge_counts
-                            .entry(EdgeType::DF)
+                            .query_event_counts
+                            .entry(transition.name.clone())
                             .and_modify(|e| *e += 1)
                             .or_insert(1);
 
-                        let a = type_storage.get_type_id(
-                            &new_partial_case
-                                .get_node(prev_event_id)
-                                .unwrap()
-                                .type_name(),
-                        );
-                        let b = type_storage.get_type_id(transition.name.as_str());
-
-                        *new_partial_case_stats
-                            .edge_type_counts
-                            .entry((EdgeType::DF, a, b))
-                            .or_insert(0) += 1;
+                        most_recent_event_id = Some(event_id);
                     }
 
-                    new_partial_case_stats
-                        .query_event_counts
-                        .entry(transition.name.clone())
-                        .and_modify(|e| *e += 1)
-                        .or_insert(1);
+                    let new_cost = self.calculate_min_cost(
+                        &query_case_stats,
+                        &new_partial_case_stats,
+                        static_cost,
+                    );
 
-                    most_recent_event_id = Some(event_id);
-                }
+                    if (new_cost < node.min_cost) {
+                        println!("!!!!! COST DECREASED WTF")
+                    }
 
-                let new_cost = self.calculate_min_cost(
-                    &query_case_stats,
-                    &new_partial_case_stats,
-                    static_cost,
-                );
+                    let forbidden_firings = if (transition.silent) {
+                        Some(forbidden_firings_per_transition.clone())
+                    } else {
+                        None
+                    };
 
-                if (new_cost < node.min_cost) {
-                    println!("!!!!! COST DECREASED WTF")
-                }
-
-                transition_children.push(SearchNode::new_with_stats(
-                    new_marking,
-                    new_partial_case,
-                    new_cost,
-                    most_recent_event_id,
-                    SearchNodeAction::fire_transition(transition.id, combination.clone().clone()),
-                    new_partial_case_stats,
-                    node.depth + 1,
-                ));
-            });
+                    transition_children.push(SearchNode::new_with_stats(
+                        new_marking,
+                        new_partial_case,
+                        new_cost,
+                        most_recent_event_id,
+                        SearchNodeAction::fire_transition(
+                            transition.id,
+                            combination.clone().clone(),
+                        ),
+                        new_partial_case_stats,
+                        node.depth + 1,
+                        forbidden_firings,
+                    ));
+                });
         }
         //println!("done getting transitions");
         // places are allowed to be dead as long as we keep adding tokens to alive them ;)
@@ -1083,6 +1157,7 @@ mod tests {
     use graphviz_rust::cmd::Format;
     use std::path::Path;
     use std::{fs, panic};
+    use std::cmp::Reverse;
 
     #[test]
     fn test_basic_alignment() {
@@ -1203,7 +1278,7 @@ mod tests {
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
             let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/crash",
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/what",
             )
             .unwrap();
             let visualized_dir =

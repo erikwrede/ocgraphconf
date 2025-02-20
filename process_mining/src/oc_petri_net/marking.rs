@@ -3,6 +3,7 @@ use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
 use crate::oc_petri_net::util::intersect_hashbag::intersect_hashbags;
 use hashbag::HashBag;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -434,11 +435,37 @@ pub struct ObjectBindingInfo {
     pub place_bindings: Vec<PlaceBinding>,
 }
 
+impl PartialEq for ObjectBindingInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.tokens == other.tokens
+    }
+}
+
+// impl Hash for ObjectBindingInfo {
+//     fn hash<H: Hasher>(&self, state: &mut H) {
+//         self.tokens.hash(state);
+//     }
+// }
+// 
+// impl Hash for Binding {
+//     fn hash<H: Hasher>(&self, state: &mut H) {
+//         self.transition_id.hash(state);
+//         self.object_binding_info.hash(state);
+//     }
+// }
+
 #[derive(Debug, Clone)]
 pub struct Binding {
     /// Tokens to take out of the place
     pub transition_id: Uuid,
     pub object_binding_info: HashMap<String, ObjectBindingInfo>,
+}
+
+impl PartialEq for Binding {
+    fn eq(&self, other: &Self) -> bool {
+        self.transition_id == other.transition_id
+            && self.object_binding_info == other.object_binding_info
+    }
 }
 
 impl std::fmt::Display for Binding {
