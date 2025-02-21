@@ -351,6 +351,11 @@ impl ModelCaseChecker {
         let mut most_recent_timestamp = std::time::Instant::now();
         while let Some(mut current_node) = open_list.pop() {
             let current_node: SearchNode = current_node.into();
+
+            if current_node.min_cost >= global_upper_bound {
+                break;
+            }
+            
             counter += 1;
             // every 5 seconds print an update
             if most_recent_timestamp.elapsed().as_secs() >= 5 {
@@ -530,7 +535,7 @@ impl ModelCaseChecker {
                     // println!("Number of nodes pruned due to best bound: {}", len);
 
                     // remove all nodes that have a cost higher than the new upper bound
-                    open_list.retain(|node| node.0.min_cost < global_upper_bound);
+                    //open_list.retain(|node| node.0.min_cost < global_upper_bound);
                 }
             }
 
