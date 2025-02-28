@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::type_storage::{EventType, TYPE_STORAGE};
+use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 
 /// Macro to implement `PartialEq`, `Eq`, and `Hash` based on `id` for structs.
 #[macro_export]
@@ -85,6 +85,7 @@ pub struct Place {
     pub id: Uuid,
     pub name: Option<String>,
     pub object_type: String,
+    pub oc_object_type: ObjectType,
     pub initial: bool,
     pub final_place: bool,
     pub input_arcs: HashSet<Arc<OutputArc>>, // Incoming arcs (OutputArcs)
@@ -136,6 +137,7 @@ impl ObjectCentricPetriNet {
         let place = Place {
             id: Uuid::new_v4(),
             name,
+            oc_object_type: object_type.clone().into(),
             object_type,
             initial,
             final_place: final_state,
@@ -366,25 +368,6 @@ impl ObjectCentricPetriNet {
 }
 
 // Implement functionality for Place and Transition
-impl Place {
-    pub fn new(
-        name: Option<String>,
-        object_type: String,
-        initial: bool,
-        final_state: bool,
-    ) -> Self {
-        Place {
-            id: Uuid::new_v4(),
-            name,
-            object_type,
-            initial,
-            final_place: final_state,
-            input_arcs: HashSet::new(),
-            output_arcs: HashSet::new(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

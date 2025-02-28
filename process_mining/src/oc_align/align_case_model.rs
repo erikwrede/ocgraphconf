@@ -1,3 +1,4 @@
+use std::any::Any;
 use crate::oc_align::align_case::CaseAlignment;
 use crate::oc_align::util::reachability_cache::ReachabilityCache;
 use crate::oc_align::visualization::case_visual::export_c2_with_alignment_image;
@@ -360,7 +361,7 @@ impl ModelCaseChecker {
             
             counter += 1;
             // every 5 seconds print an update
-            if most_recent_timestamp.elapsed().as_secs() >= 5 {
+            if most_recent_timestamp.elapsed().as_secs() >= 30 {
                 most_recent_timestamp = std::time::Instant::now();
                 println!("===================== Progress update =====================");
                 println!("Nodes explored: {}", counter);
@@ -768,7 +769,8 @@ impl ModelCaseChecker {
 
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
         //println!("GEtting initial places");
-        if (node.action.is_pre_firing() && false) {
+        if (node.action.is_pre_firing()) {
+            println!("Pre firing");
             // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
             // this is because we can only add tokens to the initial places in lexicographical order
 
@@ -792,7 +794,6 @@ impl ModelCaseChecker {
 
             let counts_per_type = node.marking.get_initial_counts_per_type();
 
-            let mut type_storage = TYPE_STORAGE.write().unwrap();
             // sort the place by amount of tokens in the marking
             initial_places.sort_by(|a, b| {
                 let a_count = counts_per_type.get(&a.object_type).unwrap_or(&0);
@@ -801,11 +802,11 @@ impl ModelCaseChecker {
 
                 let a_query_count = query_case_stats
                     .query_object_counts
-                    .get(&ObjectType(type_storage.get_or_insert_type_id(&a.object_type)))
+                    .get(&a.oc_object_type)
                     .unwrap_or(&0);
                 let b_query_count = query_case_stats
                     .query_object_counts
-                    .get(&ObjectType(type_storage.get_or_insert_type_id(&b.object_type)))
+                    .get(&b.oc_object_type)
                     .unwrap_or(&0);
 
                 let a_diff = (*a_query_count as i64 - *a_count as i64);
@@ -854,7 +855,7 @@ impl ModelCaseChecker {
                     let mut new_partial_case_stats = node.partial_case_stats.clone();
                     new_partial_case_stats
                         .query_object_counts
-                        .entry(ObjectType(type_storage.get_or_insert_type_id(&place.object_type)))
+                        .entry(place.oc_object_type)
                         .and_modify(|e| *e += 1)
                         .or_insert(1);
 
@@ -1112,33 +1113,32 @@ impl ModelCaseChecker {
         //println!("done checking dead");
 
         // sort the transitions by the difference between case stats and query case stats
-        let mut type_storage = TYPE_STORAGE.write().unwrap();
         transition_children.sort_by(|a, b| {
             // prioritize transitions that have a higher difference between the case stats and the query case stats
             // all actions in this list are transitions
             let transition_a = a.action.transition_id().unwrap();
 
-            let transition_name = &self.model.get_transition(&transition_a).unwrap().name;
+            let transition_type = &self.model.get_transition(&transition_a).unwrap().event_type;
 
             let difference_a = *query_case_stats
                 .query_event_counts
-                .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
+                .get(transition_type)
                 .unwrap_or(&0) as i64
                 - *a.partial_case_stats
                     .query_event_counts
-                    .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
+                    .get(transition_type)
                     .unwrap_or(&0) as i64;
 
             let transition_b = b.action.transition_id().unwrap();
-            let transition_name = &self.model.get_transition(&transition_b).unwrap().name;
+            let transition_type = &self.model.get_transition(&transition_b).unwrap().event_type;
 
             let difference_b = *query_case_stats
                 .query_event_counts
-                .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
+                .get(transition_type)
                 .unwrap_or(&0) as i64
                 - *b.partial_case_stats
                     .query_event_counts
-                    .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
+                    .get(transition_type)
                     .unwrap_or(&0) as i64;
 
             difference_a.partial_cmp(&difference_b).unwrap()
