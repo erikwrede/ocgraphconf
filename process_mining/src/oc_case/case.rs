@@ -1,3 +1,4 @@
+use std::any::Any;
 use crate::id_based_impls;
 use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use std::hash::{Hash, Hasher};
 #[derive(Debug, Clone)]
 pub struct Event {
     pub id: usize,
-    pub event_type: String,
+    pub event_type: EventType,
 }
 id_based_impls!(Event);
 
@@ -16,7 +17,7 @@ id_based_impls!(Event);
 #[derive(Debug, Clone)]
 pub struct Object {
     pub id: usize,
-    pub object_type: String,
+    pub object_type: ObjectType,
 }
 id_based_impls!(Object);
 
@@ -37,8 +38,15 @@ impl Node {
 
     pub fn type_name(&self) -> String {
         match self {
-            Node::EventNode(event) => event.event_type.clone(),
-            Node::ObjectNode(object) => object.object_type.clone(),
+            Node::EventNode(event) => event.event_type.to_string(),
+            Node::ObjectNode(object) => object.object_type.to_string(),
+        }
+    }
+    
+    pub fn oc_type_id(&self) -> usize {
+        match self {
+            Node::EventNode(event) => event.event_type.0,
+            Node::ObjectNode(object) => object.object_type.0,
         }
     }
 }
@@ -195,14 +203,13 @@ impl CaseGraph {
     pub fn count_nodes_by_type(&self) -> (HashMap<EventType, usize>, HashMap<ObjectType, usize>) {
         let mut event_counts = HashMap::new();
         let mut object_counts = HashMap::new();
-        let mut type_storage = TYPE_STORAGE.write().unwrap();
         for node in self.nodes.values() {
             match node {
                 Node::EventNode(event) => {
-                    *event_counts.entry(type_storage.get_or_insert_type_id(event.event_type.as_str()).into()).or_insert(0) += 1;
+                    *event_counts.entry(event.event_type).or_insert(0) += 1;
                 }
                 Node::ObjectNode(object) => {
-                    *object_counts.entry(type_storage.get_or_insert_type_id(object.object_type.as_str()).into()).or_insert(0) += 1;
+                    *object_counts.entry(object.object_type).or_insert(0) += 1;
                 }
             }
         }
@@ -222,15 +229,13 @@ impl CaseGraph {
         let mut edge_counts = HashMap::new();
         let mut type_storage = TYPE_STORAGE.write().unwrap();
         for edge in self.edges.values() {
-            let from_type = self.get_node(edge.from).unwrap().type_name();
-            let to_type = self.get_node(edge.to).unwrap().type_name();
+            let from_type = self.get_node(edge.from).unwrap().oc_type_id();
+            let to_type = self.get_node(edge.to).unwrap().oc_type_id();
             *edge_counts
                 .entry((
                     edge.edge_type,
-                    type_storage
-                        .get_or_insert_type_id(from_type.as_str()),
-                    type_storage
-                        .get_or_insert_type_id(to_type.as_str()),
+                    from_type,
+                    to_type
                 ))
                 .or_insert(0) += 1;
         }
@@ -259,11 +264,11 @@ mod tests {
         let mut graph = CaseGraph::new();
         let event1 = Event {
             id: 1,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         };
         let object1 = Object {
             id: 2,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         };
         graph.add_node(Node::EventNode(event1.clone()));
         graph.add_node(Node::ObjectNode(object1.clone()));
@@ -278,19 +283,19 @@ mod tests {
         // Add nodes
         let event1 = Event {
             id: 1,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         };
         let event2 = Event {
             id: 2,
-            event_type: "B".to_string(),
+            event_type: "B".into(),
         };
         let object1 = Object {
             id: 3,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         };
         let object2 = Object {
             id: 4,
-            object_type: "Device".to_string(),
+            object_type: "Device".into(),
         };
         graph.add_node(Node::EventNode(event1));
         graph.add_node(Node::EventNode(event2));
@@ -336,11 +341,11 @@ mod tests {
         // Add nodes
         let event1 = Event {
             id: 1,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         };
         let event2 = Event {
             id: 2,
-            event_type: "B".to_string(),
+            event_type: "B".into(),
         };
         graph.add_node(Node::EventNode(event1));
         graph.add_node(Node::EventNode(event2));
@@ -361,15 +366,15 @@ mod tests {
         // Add nodes
         let event1 = Event {
             id: 1,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         };
         let event2 = Event {
             id: 2,
-            event_type: "B".to_string(),
+            event_type: "B".into(),
         };
         let object1 = Object {
             id: 3,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         };
         graph.add_node(Node::EventNode(event1));
         graph.add_node(Node::EventNode(event2));

@@ -82,11 +82,11 @@ mod tests {
         // Add nodes
         let event = Event {
             id: 1,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         };
         let object = Object {
             id: 2,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         };
         graph.add_node(EventNode(event));
         graph.add_node(ObjectNode(object));

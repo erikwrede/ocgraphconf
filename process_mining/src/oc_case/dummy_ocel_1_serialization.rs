@@ -187,7 +187,7 @@ fn ocel_to_case_graph(ocel: OcelLog) -> CaseGraph {
 
         let object = Object {
             id: new_id,
-            object_type: ocel_object.object_type.clone(),
+            object_type: ocel_object.object_type.clone().into(),
         };
         graph.add_node(Node::ObjectNode(object));
     }
@@ -205,7 +205,7 @@ fn ocel_to_case_graph(ocel: OcelLog) -> CaseGraph {
 
         let event = Event {
             id: new_id,
-            event_type: ocel_event.activity.clone(),
+            event_type: ocel_event.activity.clone().into(),
         };
         graph.add_node(Node::EventNode(event));
 

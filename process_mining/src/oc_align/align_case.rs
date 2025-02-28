@@ -622,15 +622,15 @@ mod tests {
         // Populate c1
         let event1 = Node::EventNode(Event {
             id: 1,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         });
         let event2 = Node::EventNode(Event {
             id: 2,
-            event_type: "B".to_string(),
+            event_type: "B".into(),
         });
         let object1 = Node::ObjectNode(Object {
             id: 3,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         });
         c1.add_node(event1);
         c1.add_node(event2);
@@ -641,19 +641,19 @@ mod tests {
         // Populate c2
         let event3 = Node::EventNode(Event {
             id: 4,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         });
         let event4 = Node::EventNode(Event {
             id: 5,
-            event_type: "B".to_string(),
+            event_type: "B".into(),
         });
         let object2 = Node::ObjectNode(Object {
             id: 6,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         });
         let object3 = Node::ObjectNode(Object {
             id: 7,
-            object_type: "Device".to_string(),
+            object_type: "Device".into(),
         });
         c2.add_node(event3);
         c2.add_node(event4);

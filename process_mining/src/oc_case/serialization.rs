@@ -14,7 +14,7 @@ impl From<Event> for SerializableEvent {
     fn from(event: Event) -> Self {
         SerializableEvent {
             id: event.id,
-            event_type: event.event_type,
+            event_type: event.event_type.to_string(),
         }
     }
 }
@@ -23,7 +23,7 @@ impl From<SerializableEvent> for Event {
     fn from(serializable_event: SerializableEvent) -> Self {
         Event {
             id: serializable_event.id,
-            event_type: serializable_event.event_type,
+            event_type: serializable_event.event_type.into(),
         }
     }
 }
@@ -39,7 +39,7 @@ impl From<Object> for SerializableObject {
     fn from(object: Object) -> Self {
         SerializableObject {
             id: object.id,
-            object_type: object.object_type,
+            object_type: object.object_type.to_string(),
         }
     }
 }
@@ -48,7 +48,7 @@ impl From<SerializableObject> for Object {
     fn from(serializable_object: SerializableObject) -> Self {
         Object {
             id: serializable_object.id,
-            object_type: serializable_object.object_type,
+            object_type: serializable_object.object_type.into(),
         }
     }
 }

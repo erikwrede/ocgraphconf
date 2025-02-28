@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
+use crate::type_storage::ObjectType;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -158,7 +159,7 @@ impl Marking {
                     common_tokens
                         .set_iter()
                         .map(|(token, token_count)| ObjectBindingInfo {
-                            object_type: _obj_type.clone(),
+                            object_type: _obj_type.as_str().into(),
                             tokens: vec![token.clone()],
                             place_bindings: places
                                 .iter()
@@ -182,7 +183,7 @@ impl Marking {
                     power_sets
                         .into_iter()
                         .map(|token_set| ObjectBindingInfo {
-                            object_type: _obj_type.clone(),
+                            object_type: _obj_type.as_str().into(),
                             tokens: token_set.iter().map(|token| token.clone()).collect(),
                             place_bindings: places
                                 .iter()
@@ -238,7 +239,7 @@ impl Marking {
             let place = self.petri_net.get_place(&arc.target_place_id).unwrap();
             for token in binding
                 .object_binding_info
-                .get(&place.object_type)
+                .get(&place.object_type.as_str().into())
                 .unwrap()
                 .tokens
                 .iter()
@@ -430,7 +431,7 @@ pub struct PlaceBinding {
 
 #[derive(Debug, Clone)]
 pub struct ObjectBindingInfo {
-    pub object_type: String,
+    pub object_type: ObjectType,
     pub tokens: Vec<OCToken>,
     pub place_bindings: Vec<PlaceBinding>,
 }
@@ -458,7 +459,7 @@ impl PartialEq for ObjectBindingInfo {
 pub struct Binding {
     /// Tokens to take out of the place
     pub transition_id: Uuid,
-    pub object_binding_info: HashMap<String, ObjectBindingInfo>,
+    pub object_binding_info: HashMap<ObjectType, ObjectBindingInfo>,
 }
 
 impl PartialEq for Binding {

@@ -54,6 +54,34 @@ impl From<usize> for EventType {
     }
 }
 
+impl From<String> for EventType {
+    fn from(type_name: String) -> Self {
+        let mut ts = TYPE_STORAGE.write().unwrap();
+        EventType(ts.get_or_insert_type_id(&type_name))
+    }
+}
+
+impl From<String> for ObjectType {
+    fn from(type_name: String) -> Self {
+        let mut ts = TYPE_STORAGE.write().unwrap();
+        ObjectType(ts.get_or_insert_type_id(&type_name))
+    }
+}
+
+impl From<&str> for EventType {
+    fn from(type_name: &str) -> Self {
+        let mut ts = TYPE_STORAGE.write().unwrap();
+        EventType(ts.get_or_insert_type_id(type_name))
+    }
+}
+
+impl From<&str> for ObjectType {
+    fn from(type_name: &str) -> Self {
+        let mut ts = TYPE_STORAGE.write().unwrap();
+        ObjectType(ts.get_or_insert_type_id(type_name))
+    }
+}
+
 pub struct TypeStorage {
     types: HashMap<String, usize>,
     ids: Vec<String>,

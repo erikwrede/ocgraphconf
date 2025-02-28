@@ -249,7 +249,7 @@ impl ModelCaseChecker {
                     let object_id = new_partial_case.get_new_id();
                     let new_object = Node::ObjectNode(Object {
                         id: object_id.clone(),
-                        object_type: typename.clone(),
+                        object_type: object_type.clone(),
                     });
                     new_partial_case.add_node(new_object);
 
@@ -297,10 +297,13 @@ impl ModelCaseChecker {
                 .map(|p| p.object_type.clone())
                 .collect::<HashSet<_>>()
         );
-
-        let mut static_void_cost =
-            self.calculate_query_static_costs(query_case, query_case.get_case_stats());
-
+        
+        let query_case_stats = query_case.get_case_stats();
+        
+        query_case_stats.pretty_print_stats();
+        let static_void_cost =
+            self.calculate_query_static_costs(query_case, &query_case_stats);
+        
         let mut any_solution_found = false;
 
         if let Some(shortest_case) = &self.shortest_case {
@@ -317,9 +320,6 @@ impl ModelCaseChecker {
                 SearchNodeAction::VOID,
             ));
         }
-
-        let query_case_stats = query_case.get_case_stats();
-        query_case_stats.pretty_print_stats();
 
         let mut open_list: BinaryHeap<OrderedSearchNode> = BinaryHeap::with_capacity(60000000);
 
@@ -614,7 +614,7 @@ impl ModelCaseChecker {
     fn calculate_query_static_costs(
         &mut self,
         query_case: &CaseGraph,
-        query_case_stats: CaseStats,
+        query_case_stats: &CaseStats,
     ) -> f64 {
         let mut total_cost = 0.0;
 
@@ -632,7 +632,7 @@ impl ModelCaseChecker {
                     .nodes
                     .values()
                     .filter(|node| match node {
-                        Node::EventNode(event) => event.event_type.eq(&evtypename),
+                        Node::EventNode(event) => event.event_type.eq(event_type),
                         _ => false,
                     })
                     .for_each(|node| {
@@ -657,7 +657,7 @@ impl ModelCaseChecker {
         }
 
         // Map of object_type to its sorted list of unused tokens
-        let mut unused_objects_per_type: HashMap<String, Vec<&OCToken>> = HashMap::new();
+        let mut unused_objects_per_type: HashMap<ObjectType, Vec<&OCToken>> = HashMap::new();
 
         // Determine all object types involved in this transition
         // Assuming a method `get_object_types_for_transition` exists
@@ -757,7 +757,7 @@ impl ModelCaseChecker {
             })
             .collect()
     }
-
+    #[inline(never)]
     fn generate_children<'a>(
         &mut self,
         node: &SearchNode,
@@ -768,7 +768,7 @@ impl ModelCaseChecker {
 
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
         //println!("GEtting initial places");
-        if (node.action.is_pre_firing()) {
+        if (node.action.is_pre_firing() && false) {
             // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
             // this is because we can only add tokens to the initial places in lexicographical order
 
@@ -798,7 +798,7 @@ impl ModelCaseChecker {
                 let a_count = counts_per_type.get(&a.object_type).unwrap_or(&0);
                 let b_count = counts_per_type.get(&b.object_type).unwrap_or(&0);
 
-                
+
                 let a_query_count = query_case_stats
                     .query_object_counts
                     .get(&ObjectType(type_storage.get_or_insert_type_id(&a.object_type)))
@@ -847,7 +847,7 @@ impl ModelCaseChecker {
 
                     let new_object = Node::ObjectNode(Object {
                         id: object_id.clone(),
-                        object_type: place.object_type.clone(),
+                        object_type: place.object_type.clone().into(),
                     });
                     new_partial_case.add_node(new_object);
 
@@ -984,11 +984,9 @@ impl ModelCaseChecker {
                         let event_id = new_partial_case.get_new_id();
                         let new_event = Node::EventNode(Event {
                             id: event_id,
-                            event_type: transition.name.clone(),
+                            event_type: transition.name.clone().into(),
                         });
                         new_partial_case.add_node(new_event);
-
-                        let mut type_storage = TYPE_STORAGE.write().unwrap();
 
                         combination
                             .object_binding_info
@@ -1008,13 +1006,10 @@ impl ModelCaseChecker {
                                         .and_modify(|e| *e += 1)
                                         .or_insert(1);
 
-                                    let a = type_storage.get_or_insert_type_id(transition.name.as_str());
-                                    let b =
-                                        type_storage.get_or_insert_type_id(binding_info.object_type.as_str());
 
                                     *new_partial_case_stats
                                         .edge_type_counts
-                                        .entry((EdgeType::E2O, a, b))
+                                        .entry((EdgeType::E2O, transition.event_type.into(), binding_info.object_type.into()))
                                         .or_insert(0) += 1;
                                 })
                             });
@@ -1033,13 +1028,12 @@ impl ModelCaseChecker {
                                 .and_modify(|e| *e += 1)
                                 .or_insert(1);
 
-                            let a = type_storage.get_or_insert_type_id(
-                                &new_partial_case
+                            let a = 
+                                new_partial_case
                                     .get_node(prev_event_id)
                                     .unwrap()
-                                    .type_name(),
-                            );
-                            let b = type_storage.get_or_insert_type_id(transition.name.as_str());
+                                    .oc_type_id();
+                            let b = transition.event_type.into();
 
                             *new_partial_case_stats
                                 .edge_type_counts
@@ -1049,7 +1043,7 @@ impl ModelCaseChecker {
 
                         new_partial_case_stats
                             .query_event_counts
-                            .entry(EventType(type_storage.get_or_insert_type_id(transition.name.as_str())))
+                            .entry(transition.event_type)
                             .and_modify(|e| *e += 1)
                             .or_insert(1);
 
@@ -1210,11 +1204,11 @@ mod tests {
         // Add nodes corresponding to the events in the query case
         let event1 = Node::EventNode(Event {
             id: 1,
-            event_type: "T1".to_string(),
+            event_type: "T1".into(),
         });
         let event2 = Node::EventNode(Event {
             id: 2,
-            event_type: "T2".to_string(),
+            event_type: "T2".into(),
         });
         query_case.add_node(event1);
         query_case.add_node(event2);
@@ -1389,11 +1383,11 @@ mod tests {
         // Add nodes corresponding to the events in the query case
         let event1 = Node::EventNode(Event {
             id: 1,
-            event_type: "T1".to_string(),
+            event_type: "T1".into(),
         });
         let event2 = Node::EventNode(Event {
             id: 2,
-            event_type: "T2".to_string(),
+            event_type: "T2".into(),
         });
         query_case.add_node(event1);
         query_case.add_node(event2);

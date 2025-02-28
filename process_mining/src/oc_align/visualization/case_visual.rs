@@ -104,8 +104,8 @@ pub fn export_c2_with_alignment_to_dot_graph(
             "red" // Unmapped nodes
         };
         let label = match node {
-            EventNode(event) => event.event_type.clone(),
-            ObjectNode(object) => object.object_type.clone(),
+            EventNode(event) => event.event_type.to_string(),
+            ObjectNode(object) => object.object_type.to_string(),
         };
         let shape = match node {
             EventNode(_) => "ellipse",
@@ -227,15 +227,15 @@ mod tests {
         // Add nodes to c1
         let event1 = Node::EventNode(Event {
             id: 1,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         });
         let event2 = Node::EventNode(Event {
             id: 2,
-            event_type: "B".to_string(),
+            event_type: "B".into(),
         });
         let object1 = Node::ObjectNode(Object {
             id: 3,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         });
         B.add_node(event1.clone());
         B.add_node(event2.clone());
@@ -253,19 +253,19 @@ mod tests {
         // Add nodes to c2
         let event3 = Node::EventNode(Event {
             id: 4,
-            event_type: "A".to_string(),
+            event_type: "A".into(),
         });
         let event4 = Node::EventNode(Event {
             id: 5,
-            event_type: "B".to_string(),
+            event_type: "B".into(),
         });
         let object2 = Node::ObjectNode(Object {
             id: 6,
-            object_type: "Person".to_string(),
+            object_type: "Person".into(),
         });
         let object3 = Node::ObjectNode(Object {
             id: 7,
-            object_type: "Device".to_string(),
+            object_type: "Device".into(),
         });
         A.add_node(event3.clone());
         A.add_node(event4.clone());
