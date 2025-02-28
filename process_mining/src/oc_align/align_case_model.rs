@@ -5,12 +5,13 @@ use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Ob
 use crate::oc_case::visualization::export_case_graph_image;
 use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
 use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
-use crate::type_storage::TYPE_STORAGE;
+use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 use graphviz_rust::cmd::Format;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Not};
 use std::sync::Arc;
+use std::thread;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -229,14 +230,15 @@ impl ModelCaseChecker {
 
         // Initialize marking and case from query_case_stats, only for initial places
         for (object_type, count) in &query_case_stats.query_object_counts {
-            if initial_places.contains(object_type) {
+            let typename = object_type.to_string();
+            if initial_places.contains(&typename) {
                 for _ in 0..*count {
                     // Find the initial place with the same object type
                     let place = self
                         .model
                         .get_initial_places()
                         .iter()
-                        .find(|p| &p.object_type == object_type)
+                        .find(|p| &p.object_type == &typename)
                         .expect("Expected matching initial place for given object type")
                         .clone();
 
@@ -247,7 +249,7 @@ impl ModelCaseChecker {
                     let object_id = new_partial_case.get_new_id();
                     let new_object = Node::ObjectNode(Object {
                         id: object_id.clone(),
-                        object_type: object_type.clone(),
+                        object_type: typename.clone(),
                     });
                     new_partial_case.add_node(new_object);
 
@@ -427,13 +429,13 @@ impl ModelCaseChecker {
                     "Intermediate alignment cost: {}",
                     intermediate_alignment.total_cost().unwrap_or(f64::INFINITY)
                 );
-                export_case_graph_image(
-                    &intermediate_graph,
-                    format!("./intermediates_4/intermediate_{}_case.png", counter).as_str(),
-                    Format::Png,
-                    Some(0.75),
-                )
-                .unwrap();
+                // export_case_graph_image(
+                //     &intermediate_graph,
+                //     format!("./intermediates_4/intermediate_{}_case.png", counter).as_str(),
+                //     Format::Png,
+                //     Some(0.75),
+                // )
+                // .unwrap();
 
                 // export_c2_with_alignment_image(
                 //     &intermediate_graph,
@@ -621,7 +623,8 @@ impl ModelCaseChecker {
         let mut unhittable_edges: HashSet<usize> = HashSet::new();
 
         for (event_type, &partial_count) in &query_case_stats.query_event_counts {
-            if !self.model_transitions.contains(event_type) {
+            let evtypename = event_type.to_string();
+            if !self.model_transitions.contains(&evtypename) {
                 total_cost += partial_count as f64;
 
                 // get all node ids with this event type in the partial case
@@ -629,7 +632,7 @@ impl ModelCaseChecker {
                     .nodes
                     .values()
                     .filter(|node| match node {
-                        Node::EventNode(event) => event.event_type.eq(event_type),
+                        Node::EventNode(event) => event.event_type.eq(&evtypename),
                         _ => false,
                     })
                     .for_each(|node| {
@@ -789,18 +792,20 @@ impl ModelCaseChecker {
 
             let counts_per_type = node.marking.get_initial_counts_per_type();
 
+            let mut type_storage = TYPE_STORAGE.write().unwrap();
             // sort the place by amount of tokens in the marking
             initial_places.sort_by(|a, b| {
                 let a_count = counts_per_type.get(&a.object_type).unwrap_or(&0);
                 let b_count = counts_per_type.get(&b.object_type).unwrap_or(&0);
 
+                
                 let a_query_count = query_case_stats
                     .query_object_counts
-                    .get(&a.object_type)
+                    .get(&ObjectType(type_storage.get_or_insert_type_id(&a.object_type)))
                     .unwrap_or(&0);
                 let b_query_count = query_case_stats
                     .query_object_counts
-                    .get(&b.object_type)
+                    .get(&ObjectType(type_storage.get_or_insert_type_id(&b.object_type)))
                     .unwrap_or(&0);
 
                 let a_diff = (*a_query_count as i64 - *a_count as i64);
@@ -849,7 +854,7 @@ impl ModelCaseChecker {
                     let mut new_partial_case_stats = node.partial_case_stats.clone();
                     new_partial_case_stats
                         .query_object_counts
-                        .entry(place.object_type.clone())
+                        .entry(ObjectType(type_storage.get_or_insert_type_id(&place.object_type)))
                         .and_modify(|e| *e += 1)
                         .or_insert(1);
 
@@ -1003,9 +1008,9 @@ impl ModelCaseChecker {
                                         .and_modify(|e| *e += 1)
                                         .or_insert(1);
 
-                                    let a = type_storage.get_type_id(transition.name.as_str());
+                                    let a = type_storage.get_or_insert_type_id(transition.name.as_str());
                                     let b =
-                                        type_storage.get_type_id(binding_info.object_type.as_str());
+                                        type_storage.get_or_insert_type_id(binding_info.object_type.as_str());
 
                                     *new_partial_case_stats
                                         .edge_type_counts
@@ -1028,13 +1033,13 @@ impl ModelCaseChecker {
                                 .and_modify(|e| *e += 1)
                                 .or_insert(1);
 
-                            let a = type_storage.get_type_id(
+                            let a = type_storage.get_or_insert_type_id(
                                 &new_partial_case
                                     .get_node(prev_event_id)
                                     .unwrap()
                                     .type_name(),
                             );
-                            let b = type_storage.get_type_id(transition.name.as_str());
+                            let b = type_storage.get_or_insert_type_id(transition.name.as_str());
 
                             *new_partial_case_stats
                                 .edge_type_counts
@@ -1044,7 +1049,7 @@ impl ModelCaseChecker {
 
                         new_partial_case_stats
                             .query_event_counts
-                            .entry(transition.name.clone())
+                            .entry(EventType(type_storage.get_or_insert_type_id(transition.name.as_str())))
                             .and_modify(|e| *e += 1)
                             .or_insert(1);
 
@@ -1113,6 +1118,7 @@ impl ModelCaseChecker {
         //println!("done checking dead");
 
         // sort the transitions by the difference between case stats and query case stats
+        let mut type_storage = TYPE_STORAGE.write().unwrap();
         transition_children.sort_by(|a, b| {
             // prioritize transitions that have a higher difference between the case stats and the query case stats
             // all actions in this list are transitions
@@ -1122,11 +1128,11 @@ impl ModelCaseChecker {
 
             let difference_a = *query_case_stats
                 .query_event_counts
-                .get(transition_name)
+                .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
                 .unwrap_or(&0) as i64
                 - *a.partial_case_stats
                     .query_event_counts
-                    .get(transition_name)
+                    .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
                     .unwrap_or(&0) as i64;
 
             let transition_b = b.action.transition_id().unwrap();
@@ -1134,11 +1140,11 @@ impl ModelCaseChecker {
 
             let difference_b = *query_case_stats
                 .query_event_counts
-                .get(transition_name)
+                .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
                 .unwrap_or(&0) as i64
                 - *b.partial_case_stats
                     .query_event_counts
-                    .get(transition_name)
+                    .get(&EventType(type_storage.get_or_insert_type_id(transition_name)))
                     .unwrap_or(&0) as i64;
 
             difference_a.partial_cmp(&difference_b).unwrap()

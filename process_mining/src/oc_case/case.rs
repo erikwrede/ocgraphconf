@@ -1,5 +1,5 @@
 use crate::id_based_impls;
-use crate::type_storage::TYPE_STORAGE;
+use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -92,8 +92,8 @@ impl Edge {
 
 #[derive(Debug, Clone)]
 pub struct CaseStats {
-    pub query_event_counts: HashMap<String, usize>,
-    pub query_object_counts: HashMap<String, usize>,
+    pub query_event_counts: HashMap<EventType, usize>,
+    pub query_object_counts: HashMap<ObjectType, usize>,
     pub query_edge_counts: HashMap<EdgeType, usize>,
     pub edge_type_counts: HashMap<(EdgeType, usize, usize), usize>,
 }
@@ -192,16 +192,17 @@ impl CaseGraph {
         }
     }
 
-    pub fn count_nodes_by_type(&self) -> (HashMap<String, usize>, HashMap<String, usize>) {
+    pub fn count_nodes_by_type(&self) -> (HashMap<EventType, usize>, HashMap<ObjectType, usize>) {
         let mut event_counts = HashMap::new();
         let mut object_counts = HashMap::new();
+        let mut type_storage = TYPE_STORAGE.write().unwrap();
         for node in self.nodes.values() {
             match node {
                 Node::EventNode(event) => {
-                    *event_counts.entry(event.event_type.clone()).or_insert(0) += 1;
+                    *event_counts.entry(type_storage.get_or_insert_type_id(event.event_type.as_str()).into()).or_insert(0) += 1;
                 }
                 Node::ObjectNode(object) => {
-                    *object_counts.entry(object.object_type.clone()).or_insert(0) += 1;
+                    *object_counts.entry(type_storage.get_or_insert_type_id(object.object_type.as_str()).into()).or_insert(0) += 1;
                 }
             }
         }
@@ -227,9 +228,9 @@ impl CaseGraph {
                 .entry((
                     edge.edge_type,
                     type_storage
-                        .get_type_id(from_type.as_str()),
+                        .get_or_insert_type_id(from_type.as_str()),
                     type_storage
-                        .get_type_id(to_type.as_str()),
+                        .get_or_insert_type_id(to_type.as_str()),
                 ))
                 .or_insert(0) += 1;
         }
