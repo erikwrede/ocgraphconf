@@ -2180,6 +2180,7 @@ dependencies = [
  "graphviz-rust",
  "hashbag",
  "lazy_static",
+ "parking_lot",
  "polars",
  "quick-xml",
  "rayon",

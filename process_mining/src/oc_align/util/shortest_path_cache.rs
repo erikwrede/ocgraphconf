@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, BinaryHeap};
 use std::sync::{Arc, Mutex};
+use parking_lot::RwLock;
 use uuid::Uuid;
 use crate::oc_petri_net::oc_petri_net::ObjectCentricPetriNet;
 
@@ -21,7 +22,7 @@ pub struct ShortestPathCache {
     petri_net: Arc<ObjectCentricPetriNet>,
     /// Cache storing shortest path results. The key is a tuple of (from_place_id, to_place_id).
     /// The value is an Option containing ShortestPathResult. None signifies no path exists.
-    cache: Mutex<HashMap<(Uuid, Uuid), Option<ShortestPathResult>>>,
+    cache: RwLock<HashMap<(Uuid, Uuid), Option<ShortestPathResult>>>,
 }
 
 impl ShortestPathCache {
@@ -29,7 +30,7 @@ impl ShortestPathCache {
     pub fn new(petri_net: Arc<ObjectCentricPetriNet>) -> Self {
         ShortestPathCache {
             petri_net,
-            cache: Mutex::new(HashMap::new()),
+            cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -48,7 +49,7 @@ impl ShortestPathCache {
 
         // Acquire the lock to access the cache.
         {
-            let cache_guard = self.cache.lock().unwrap();
+            let cache_guard = self.cache.read();
             if let Some(cached_result) = cache_guard.get(&(*from_place_id, *to_place_id)) {
                 return cached_result.clone();
             }
@@ -58,7 +59,7 @@ impl ShortestPathCache {
         let result = self.find_shortest_path(from_place_id, to_place_id);
 
         // Store the result in the cache.
-        let mut cache_guard = self.cache.lock().unwrap();
+        let mut cache_guard = self.cache.write();
         cache_guard.insert((*from_place_id, *to_place_id), result.clone());
 
         result

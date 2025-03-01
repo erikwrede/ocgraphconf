@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use parking_lot::RwLock;
 use uuid::Uuid;
 use crate::oc_petri_net::oc_petri_net::ObjectCentricPetriNet;
 
@@ -9,7 +10,7 @@ pub struct ReachabilityCache {
     /// Reference to the Petri net.
     petri_net: Arc<ObjectCentricPetriNet>,
     /// Cache storing reachability results. The key is a tuple of (from_place_id, to_place_id).
-    cache: Mutex<HashMap<(Uuid, Uuid), bool>>,
+    cache: RwLock<HashMap<(Uuid, Uuid), bool>>,
 }
 
 impl ReachabilityCache {
@@ -17,7 +18,7 @@ impl ReachabilityCache {
     pub fn new(petri_net: Arc<ObjectCentricPetriNet>) -> Self {
         ReachabilityCache {
             petri_net,
-            cache: Mutex::new(HashMap::new()),
+            cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -31,7 +32,7 @@ impl ReachabilityCache {
 
         // Acquire the lock to access the cache.
         {
-            let cache_guard = self.cache.lock().unwrap();
+            let cache_guard = self.cache.read();
             if let Some(&result) = cache_guard.get(&(*from_place_id, *to_place_id)) {
                 return result;
             }
@@ -41,7 +42,7 @@ impl ReachabilityCache {
         let result = self.bfs_reachable(from_place_id, to_place_id);
 
         // Store the result in the cache.
-        let mut cache_guard = self.cache.lock().unwrap();
+        let mut cache_guard = self.cache.write();
         cache_guard.insert((*from_place_id, *to_place_id), result);
 
         result
