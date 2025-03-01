@@ -1,18 +1,18 @@
-use std::any::Any;
 use crate::oc_align::align_case::CaseAlignment;
 use crate::oc_align::util::reachability_cache::ReachabilityCache;
+use crate::oc_align::util::shortest_path_cache::ShortestPathCache;
 use crate::oc_align::visualization::case_visual::export_c2_with_alignment_image;
 use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Object};
 use crate::oc_case::visualization::export_case_graph_image;
 use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
 use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
-use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
+use crate::type_storage::{ObjectType, TYPE_STORAGE};
 use graphviz_rust::cmd::Format;
+use std::any::Any;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::ops::{Deref, Not};
+use std::ops::{Add, Deref, Not};
 use std::sync::Arc;
-use std::thread;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -185,6 +185,7 @@ impl SearchNodeAction {
 pub struct ModelCaseChecker {
     token_graph_id_mapping: HashMap<usize, usize>,
     reachability_cache: ReachabilityCache,
+    shortest_path_cache: ShortestPathCache,
     model: Arc<ObjectCentricPetriNet>,
     shortest_case: Option<CaseGraph>,
     model_transitions: HashSet<String>,
@@ -194,6 +195,7 @@ impl ModelCaseChecker {
         ModelCaseChecker {
             token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
+            shortest_path_cache: ShortestPathCache::new(model.clone()),
             model_transitions: model.transitions.values().map(|t| t.name.clone()).collect(),
             model,
             shortest_case: None,
@@ -208,6 +210,7 @@ impl ModelCaseChecker {
             token_graph_id_mapping: HashMap::new(),
             reachability_cache: ReachabilityCache::new(model.clone()),
             model_transitions: model.transitions.values().map(|t| t.name.clone()).collect(),
+            shortest_path_cache: ShortestPathCache::new(model.clone()),
             model,
             shortest_case: Some(shortest_case),
         }
@@ -264,6 +267,7 @@ impl ModelCaseChecker {
             &query_case_stats,
             &new_partial_case.get_case_stats(),
             static_cost,
+            &new_marking,
         );
         println!("Starting Min Cost: {}", min_cost);
         // Calculate the minimum cost using the initialized stats
@@ -298,13 +302,12 @@ impl ModelCaseChecker {
                 .map(|p| p.object_type.clone())
                 .collect::<HashSet<_>>()
         );
-        
+
         let query_case_stats = query_case.get_case_stats();
-        
+
         query_case_stats.pretty_print_stats();
-        let static_void_cost =
-            self.calculate_query_static_costs(query_case, &query_case_stats);
-        
+        let static_void_cost = self.calculate_query_static_costs(query_case, &query_case_stats);
+
         let mut any_solution_found = false;
 
         if let Some(shortest_case) = &self.shortest_case {
@@ -358,7 +361,7 @@ impl ModelCaseChecker {
             if current_node.min_cost >= global_upper_bound {
                 break;
             }
-            
+
             counter += 1;
             // every 5 seconds print an update
             if most_recent_timestamp.elapsed().as_secs() >= 30 {
@@ -573,6 +576,7 @@ impl ModelCaseChecker {
         query_case_stats: &CaseStats,
         partial_case_stats: &CaseStats,
         static_cost: f64,
+        marking: &Marking,
     ) -> f64 {
         let mut total_cost = 0.0;
 
@@ -601,6 +605,29 @@ impl ModelCaseChecker {
             total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
         }*/
 
+        let mut more_epsilon_than_void = true;
+
+        for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
+            let partial_count = partial_case_stats
+                .edge_type_counts
+                .get(&(*edge_type, *a, *b))
+                .unwrap_or(&0);
+
+            if (edge_type.eq(&EdgeType::E2O) && *partial_count == 0) {
+                let type_storage = TYPE_STORAGE.read().unwrap();
+                let type_name = type_storage.get_type_name(*a).unwrap();
+                if (self.model_transitions.contains(&type_name.to_string())) {
+                    more_epsilon_than_void = false;
+                    break;
+                } else { 
+                    println!("false!!!!!")
+                }
+            } else if (*partial_count < query_count && edge_type.eq(&EdgeType::E2O)) {
+                more_epsilon_than_void = false;
+                break;
+            }
+        }
+
         for ((edge_type, a, b), &partial_count) in &partial_case_stats.edge_type_counts {
             let query_count = query_case_stats
                 .edge_type_counts
@@ -609,7 +636,72 @@ impl ModelCaseChecker {
             total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
         }
 
-        total_cost + static_cost
+        let mut more_epsilon_cost = 0.0;
+        if (more_epsilon_than_void) {
+            marking
+                .assignments
+                .iter()
+                .filter(|(place_id, _)| {
+                    let place = self.model.get_place(place_id).unwrap();
+                    !place.final_place
+                })
+                .for_each(|(place_id, count)| {
+                    let place = self.model.get_place(place_id).unwrap();
+
+                    let final_place = self
+                        .model
+                        .get_final_place_for_type(&place.object_type)
+                        .unwrap();
+
+                    let shortest_path = self
+                        .shortest_path_cache
+                        .shortest_path(&place.id, &final_place.id)
+                        .unwrap()
+                        .distance;
+                    more_epsilon_cost += (shortest_path * count.len()) as f64;
+                });
+            //println!("More_epsilon_cost: {}", more_epsilon_cost)
+        }
+
+        total_cost + static_cost + more_epsilon_cost
+    }
+
+    fn more_epsilon_than_void_with_debug(&self, marking: &Marking) {
+        let mut more_epsilon_cost = 0.0;
+        marking
+            .assignments
+            .iter()
+            .filter(|(place_id, _)| {
+                let place = self.model.get_place(place_id).unwrap();
+                !place.final_place
+            })
+            .for_each(|(place_id, count)| {
+                let place = self.model.get_place(place_id).unwrap();
+
+                let final_place = self
+                    .model
+                    .get_final_place_for_type(&place.object_type)
+                    .unwrap();
+
+                let shortest_path = self
+                    .shortest_path_cache
+                    .shortest_path(&place.id, &final_place.id)
+                    .unwrap()
+                    .distance;
+
+                if (count.len() > 0) {
+                    println!(
+                        "Adding {} * {} = {} for path between {} {}",
+                        shortest_path,
+                        count.len(),
+                        (shortest_path * count.len()) as f64,
+                        place.name.clone().unwrap_or("".to_string()),
+                        final_place.name.clone().unwrap_or("".to_string())
+                    );
+                }
+                more_epsilon_cost += (shortest_path * count.len()) as f64;
+            });
+        //println!("More_epsilon_cost: {}", more_epsilon_cost)
     }
 
     fn calculate_query_static_costs(
@@ -799,7 +891,6 @@ impl ModelCaseChecker {
                 let a_count = counts_per_type.get(&a.object_type).unwrap_or(&0);
                 let b_count = counts_per_type.get(&b.object_type).unwrap_or(&0);
 
-
                 let a_query_count = query_case_stats
                     .query_object_counts
                     .get(&a.oc_object_type)
@@ -863,6 +954,7 @@ impl ModelCaseChecker {
                         &query_case_stats,
                         &new_partial_case_stats,
                         static_cost,
+                        &new_marking,
                     );
                     self.token_graph_id_mapping.insert(token_ids[0], object_id);
 
@@ -965,8 +1057,9 @@ impl ModelCaseChecker {
                 }
                 None => filtered_combinations.clone(),
             };
-            let filtered_out_len = filtered_combinations.len() - filtered_forbidden_combinations.len();
-            if(filtered_out_len > 0) {
+            let filtered_out_len =
+                filtered_combinations.len() - filtered_forbidden_combinations.len();
+            if (filtered_out_len > 0) {
                 //println!("Filtered out {} forbidden combinations", filtered_out_len);
             }
 
@@ -1007,10 +1100,13 @@ impl ModelCaseChecker {
                                         .and_modify(|e| *e += 1)
                                         .or_insert(1);
 
-
                                     *new_partial_case_stats
                                         .edge_type_counts
-                                        .entry((EdgeType::E2O, transition.event_type.into(), binding_info.object_type.into()))
+                                        .entry((
+                                            EdgeType::E2O,
+                                            transition.event_type.into(),
+                                            binding_info.object_type.into(),
+                                        ))
                                         .or_insert(0) += 1;
                                 })
                             });
@@ -1029,11 +1125,10 @@ impl ModelCaseChecker {
                                 .and_modify(|e| *e += 1)
                                 .or_insert(1);
 
-                            let a = 
-                                new_partial_case
-                                    .get_node(prev_event_id)
-                                    .unwrap()
-                                    .oc_type_id();
+                            let a = new_partial_case
+                                .get_node(prev_event_id)
+                                .unwrap()
+                                .oc_type_id();
                             let b = transition.event_type.into();
 
                             *new_partial_case_stats
@@ -1055,10 +1150,51 @@ impl ModelCaseChecker {
                         &query_case_stats,
                         &new_partial_case_stats,
                         static_cost,
+                        &new_marking,
                     );
 
                     if (new_cost < node.min_cost) {
-                        println!("!!!!! COST DECREASED WTF")
+                        println!("!!!!! COST DECREASED by {} WTF", node.min_cost - new_cost);
+                        self.more_epsilon_than_void_with_debug(&node.marking);
+                        for ((edge_type, a, b), &partial_count) in
+                            &node.partial_case_stats.edge_type_counts
+                        {
+                            if edge_type.ne(&EdgeType::E2O) { continue; }
+                            let query_count = query_case_stats
+                                .edge_type_counts
+                                .get(&(*edge_type, *a, *b))
+                                .unwrap_or(&0);
+                            let type_storage = TYPE_STORAGE.read().unwrap();
+                            println!(
+                                "Edge: ({:?},{},{}) Difference: {}",
+                                edge_type,
+                                type_storage.get_type_name(*a).unwrap(),
+                                type_storage.get_type_name(*b).unwrap(),
+                                (partial_count as f64 - *query_count as f64)
+                            );
+                        }
+                        println!("-----------------");
+                        println!("After firing transition: {}", transition.name);
+                        for ((edge_type, a, b), &partial_count) in
+                            &new_partial_case_stats.edge_type_counts
+                        {
+                            if edge_type.ne(&EdgeType::E2O) { continue; }
+                            let query_count = query_case_stats
+                                .edge_type_counts
+                                .get(&(*edge_type, *a, *b))
+                                .unwrap_or(&0);
+                            let type_storage = TYPE_STORAGE.read().unwrap();
+                            println!(
+                                "Edge: ({:?},{},{}) Difference: {}",
+                                edge_type,
+                                type_storage.get_type_name(*a).unwrap(),
+                                type_storage.get_type_name(*b).unwrap(),
+                                (partial_count as f64 - *query_count as f64)
+                            );
+                        }
+                        self.more_epsilon_than_void_with_debug(&new_marking);
+                        println!("-----------------");
+                        query_case_stats.pretty_print_stats()
                     }
 
                     let forbidden_firings = if (transition.silent) {
@@ -1162,7 +1298,6 @@ mod tests {
     use graphviz_rust::cmd::Format;
     use std::path::Path;
     use std::{fs, panic};
-    use std::cmp::Reverse;
 
     #[test]
     fn test_basic_alignment() {

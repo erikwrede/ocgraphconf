@@ -170,8 +170,11 @@ fn run_controller(
         let start_time = Instant::now();
 
         // Set timeout of 2.5 hours
-        let timeout = Duration::from_secs(2 * 60 * 60 + 30 * 60); // 2.5 hours
+        //let timeout = Duration::from_secs(2 * 60 * 60 + 30 * 60); // 2.5 hours
 
+        // set timeout of 7 minutes
+        let timeout = Duration::from_secs(60*5); // 5 minutes
+        
         // Open the log file and wrap it in an Arc<Mutex<>> for thread-safe access
         let log_file = File::create(&log_path)?;
         let log_file = Arc::new(Mutex::new(log_file));

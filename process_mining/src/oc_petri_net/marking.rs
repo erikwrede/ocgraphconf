@@ -28,7 +28,7 @@ impl OCToken {
 #[derive(Debug, Clone)]
 pub struct Marking {
     petri_net: Arc<ObjectCentricPetriNet>,
-    assignments: HashMap<Uuid, HashBag<OCToken>>,
+    pub assignments: HashMap<Uuid, HashBag<OCToken>>,
 }
 
 impl Marking {

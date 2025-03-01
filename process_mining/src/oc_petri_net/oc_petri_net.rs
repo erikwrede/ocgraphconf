@@ -165,6 +165,10 @@ impl ObjectCentricPetriNet {
             .filter(|place| place.final_place)
             .collect()
     }
+    
+    pub fn get_final_place_for_type(&self, object_type: &str) -> Option<&Place> {
+        self.places.values().find(|place| place.object_type == object_type && place.final_place)
+    }
 
     // Transition Operations
     pub fn add_transition(

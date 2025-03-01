@@ -1,7 +1,7 @@
-use std::any::Any;
 use crate::id_based_impls;
 use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -42,7 +42,7 @@ impl Node {
             Node::ObjectNode(object) => object.object_type.to_string(),
         }
     }
-    
+
     pub fn oc_type_id(&self) -> usize {
         match self {
             Node::EventNode(event) => event.event_type.0,
@@ -108,17 +108,29 @@ pub struct CaseStats {
 
 impl CaseStats {
     pub fn pretty_print_stats(&self) {
-        println!("Event counts:");
-        for (event_type, count) in &self.query_event_counts {
-            println!("{}: {}", event_type, count);
-        }
-        println!("Object counts:");
-        for (object_type, count) in &self.query_object_counts {
-            println!("{}: {}", object_type, count);
-        }
-        println!("Edge counts:");
-        for (edge_type, count) in &self.query_edge_counts {
-            println!("{:?}: {}", edge_type, count);
+        // println!("Event counts:");
+        // for (event_type, count) in &self.query_event_counts {
+        //     println!("{}: {}", event_type, count);
+        // }
+        // println!("Object counts:");
+        // for (object_type, count) in &self.query_object_counts {
+        //     println!("{}: {}", object_type, count);
+        // }
+        // println!("Edge counts:");
+        // for (edge_type, count) in &self.query_edge_counts {
+        //     println!("{:?}: {}", edge_type, count);
+        // }
+        println!("Detailed edge counts:");
+        let type_storage = TYPE_STORAGE.read().unwrap();
+        for ((edge_type, from_type, to_type), count) in &self.edge_type_counts {
+            if edge_type.ne(&EdgeType::E2O) { continue; }
+            println!(
+                "Edge: ({:?},{},{}) Difference: {}",
+                edge_type,
+                type_storage.get_type_name(*from_type).unwrap(),
+                type_storage.get_type_name(*to_type).unwrap(),
+                count
+            );
         }
     }
 }
@@ -232,11 +244,7 @@ impl CaseGraph {
             let from_type = self.get_node(edge.from).unwrap().oc_type_id();
             let to_type = self.get_node(edge.to).unwrap().oc_type_id();
             *edge_counts
-                .entry((
-                    edge.edge_type,
-                    from_type,
-                    to_type
-                ))
+                .entry((edge.edge_type, from_type, to_type))
                 .or_insert(0) += 1;
         }
         edge_counts
@@ -250,7 +258,7 @@ impl CaseGraph {
             query_event_counts,
             query_object_counts,
             query_edge_counts,
-            edge_type_counts
+            edge_type_counts,
         }
     }
 }
