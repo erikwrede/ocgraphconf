@@ -100,27 +100,25 @@ impl Marking {
     /// Returns all possible firing combinations for the given transition.
     pub fn get_firing_combinations(&self, transition: &Transition) -> Vec<Binding> {
         let default: HashBag<OCToken> = HashBag::new();
-        let mut input_place_map: HashMap<String, Vec<(&Uuid, &HashBag<OCToken>)>> = HashMap::new();
+        let mut input_place_map: HashMap<ObjectType, Vec<(&Uuid, &HashBag<OCToken>)>> = HashMap::new();
 
-        let mut object_type_variable: HashMap<String, bool> = HashMap::new();
+        let mut object_type_variable: HashMap<ObjectType, bool> = HashMap::new();
 
         // Group input places by object_type along with their required token counts
         for arc in transition.input_arcs.iter() {
             let place_id = &arc.source_place_id;
             let place = self.petri_net.get_place(place_id).expect("Place not found");
 
-            let obj_type = place.object_type.clone();
-
             let bag = self.assignments.get(place_id).unwrap_or(&default);
 
-            object_type_variable.insert(obj_type.clone(), arc.variable);
+            object_type_variable.insert(place.oc_object_type, arc.variable);
 
             if (bag.len() == 0) {
                 return vec![];
             }
 
             input_place_map
-                .entry(obj_type)
+                .entry(place.oc_object_type)
                 .or_insert_with(Vec::new)
                 .push((place_id, bag));
         }
@@ -128,7 +126,7 @@ impl Marking {
         // One for obj_type, one for place, one for all variable arc combinations
         let mut obj_type_tokens: Vec<Vec<ObjectBindingInfo>> = Vec::new();
 
-        let mut common_tokens_per_type: HashMap<String, HashBag<OCToken>> = HashMap::new();
+        let mut common_tokens_per_type: HashMap<ObjectType, HashBag<OCToken>> = HashMap::new();
 
         // first assert all obj types required for the transition have common tokens
         for (_obj_type, places) in input_place_map.iter() {
@@ -159,7 +157,7 @@ impl Marking {
                     common_tokens
                         .set_iter()
                         .map(|(token, token_count)| ObjectBindingInfo {
-                            object_type: _obj_type.as_str().into(),
+                            object_type: _obj_type.clone(),
                             tokens: vec![token.clone()],
                             place_bindings: places
                                 .iter()
@@ -183,7 +181,7 @@ impl Marking {
                     power_sets
                         .into_iter()
                         .map(|token_set| ObjectBindingInfo {
-                            object_type: _obj_type.as_str().into(),
+                            object_type: _obj_type.clone(),
                             tokens: token_set.iter().map(|token| token.clone()).collect(),
                             place_bindings: places
                                 .iter()
