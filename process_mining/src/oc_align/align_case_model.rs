@@ -23,7 +23,7 @@ pub struct SearchNode {
     most_recent_event_id: Option<usize>,
     action: SearchNodeAction,
     partial_case_stats: CaseStats,
-    forbidden_firings: Option<HashMap<Uuid, Vec<Binding>>>,
+    forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
     depth: usize,
 }
 
@@ -95,7 +95,7 @@ impl SearchNode {
         action: SearchNodeAction,
         partial_case_stats: CaseStats,
         depth: usize,
-        forbidden_firings: Option<HashMap<Uuid, Vec<Binding>>>,
+        forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
     ) -> Self {
         SearchNode {
             marking,
@@ -112,14 +112,14 @@ impl SearchNode {
 
 #[derive(Debug, Clone)]
 enum SearchNodeAction {
-    FireTransition(Uuid, Binding),
+    FireTransition(Uuid, Arc<Binding>),
     AddToken(Uuid),
     // used for the initial node
     VOID,
 }
 
 impl SearchNodeAction {
-    fn fire_transition(transition_id: Uuid, binding: Binding) -> Self {
+    fn fire_transition(transition_id: Uuid, binding: Arc<Binding>) -> Self {
         SearchNodeAction::FireTransition(transition_id, binding)
     }
 
@@ -355,6 +355,7 @@ impl ModelCaseChecker {
         let mut mip_counter = 0;
         // save current time
         let mut most_recent_timestamp = std::time::Instant::now();
+        let beginning_timestamp = most_recent_timestamp;
         while let Some(mut current_node) = open_list.pop() {
             let current_node: SearchNode = current_node.into();
 
@@ -368,6 +369,7 @@ impl ModelCaseChecker {
                 most_recent_timestamp = std::time::Instant::now();
                 println!("===================== Progress update =====================");
                 println!("Nodes explored: {}", counter);
+                println!("Exploration rate: {} nodes per second", counter as f64 / beginning_timestamp.elapsed().as_secs_f64());
                 println!("Nodes aligned: {}", mip_counter);
                 println!("Open list length: {}", open_list.len());
                 println!("Current node min cost: {}", current_node.min_cost);
@@ -571,6 +573,7 @@ impl ModelCaseChecker {
         best_node
     }
 
+    #[inline(never)]
     fn calculate_min_cost(
         &self,
         query_case_stats: &CaseStats,
@@ -738,15 +741,16 @@ impl ModelCaseChecker {
 
         total_cost + unhittable_edges.len() as f64
     }
-    fn filter_firing_combinations<'a>(
+    #[inline(never)]
+    fn filter_firing_combinations(
         &self,
-        firing_combinations: &'a [Binding],
+        firing_combinations: &Vec<Arc<Binding>>,
         transition: &Transition,
         node: &SearchNode,
-    ) -> Vec<&'a Binding> {
+    ) -> Vec<Arc<Binding>> {
         // If the transition has variable arcs, retain all combinations
         if transition.input_arcs.iter().any(|arc| arc.variable) {
-            return firing_combinations.iter().collect();
+            return firing_combinations.iter().cloned().collect();
         }
 
         // Map of object_type to its sorted list of unused tokens
@@ -848,6 +852,7 @@ impl ModelCaseChecker {
                         }
                     })
             })
+            .cloned()
             .collect()
     }
     #[inline(never)]
@@ -979,9 +984,9 @@ impl ModelCaseChecker {
         //
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
 
-        let mut firing_combinations_per_transition: HashMap<Uuid, Vec<Binding>> = HashMap::new();
+        let mut firing_combinations_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> = HashMap::new();
 
-        let mut forbidden_firings_per_transition: HashMap<Uuid, Vec<Binding>> = HashMap::new();
+        let mut forbidden_firings_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> = HashMap::new();
 
         let mut transition_children: Vec<SearchNode> = Vec::new();
         for transition in self.model.transitions.values() {
@@ -993,25 +998,24 @@ impl ModelCaseChecker {
             }
 
             transition_enabled.insert(transition.id, firing_combinations.len() > 0);
-            firing_combinations_per_transition.insert(transition.id, firing_combinations.clone());
+            let firing_combinations : Vec<Arc<Binding>> = firing_combinations.into_iter().map(Arc::new).collect();
 
             if (!transition.silent) {
-                forbidden_firings_per_transition.insert(transition.id, firing_combinations);
+                forbidden_firings_per_transition.insert(transition.id, firing_combinations.iter().cloned().collect());
             }
+            
+            firing_combinations_per_transition.insert(transition.id, firing_combinations);
+
         }
+        
 
         if let Some(forbidden_firings_previous) = &node.forbidden_firings {
             // if this is the case, merge forbidden_firings_per_transition with forbidden_firings_previous
-            for (transition_id, forbidden_firings) in forbidden_firings_previous {
+            for (transition_id, forbidden_firings_to_extend) in forbidden_firings_previous {
                 let forbidden_firings = forbidden_firings_per_transition
                     .entry(*transition_id)
                     .or_insert_with(|| vec![]);
-                forbidden_firings.extend(
-                    forbidden_firings_previous
-                        .get(transition_id)
-                        .unwrap()
-                        .clone(),
-                );
+                forbidden_firings.extend(forbidden_firings_to_extend.iter().cloned());
             }
         }
 
@@ -1046,13 +1050,14 @@ impl ModelCaseChecker {
                         let forbidden_firings = forbidden_firings.unwrap();
                         filtered_combinations
                             .iter()
-                            .filter_map(|&combination| {
+                            .filter_map(|combination| {
                                 if (forbidden_firings.contains(combination)) {
                                     return None;
                                 }
                                 return Some(combination);
                             })
-                            .collect::<Vec<&Binding>>()
+                            .cloned()
+                            .collect()
                     }
                 }
                 None => filtered_combinations.clone(),
