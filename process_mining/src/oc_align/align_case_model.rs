@@ -21,7 +21,7 @@ pub struct SearchNode {
     pub partial_case: CaseGraph,
     pub min_cost: f64,
     most_recent_event_id: Option<usize>,
-    action: SearchNodeAction,
+    action_path: Vec<Arc<SearchNodeAction>>,
     partial_case_stats: CaseStats,
     forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
     depth: usize,
@@ -72,7 +72,7 @@ impl SearchNode {
         partial_case: CaseGraph,
         min_cost: f64,
         most_recent_event_id: Option<usize>,
-        action: SearchNodeAction,
+        action: Vec<Arc<SearchNodeAction>>,
     ) -> Self {
         SearchNode {
             marking,
@@ -80,7 +80,7 @@ impl SearchNode {
             partial_case,
             min_cost,
             most_recent_event_id,
-            action,
+            action_path: action,
             depth: 0,
             forbidden_firings: None,
         }
@@ -92,7 +92,7 @@ impl SearchNode {
         partial_case: CaseGraph,
         min_cost: f64,
         most_recent_event_id: Option<usize>,
-        action: SearchNodeAction,
+        action: Vec<Arc<SearchNodeAction>>,
         partial_case_stats: CaseStats,
         depth: usize,
         forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
@@ -103,10 +103,26 @@ impl SearchNode {
             partial_case,
             min_cost,
             most_recent_event_id,
-            action,
+            action_path: action,
             depth,
             forbidden_firings,
         }
+    }
+
+    fn action_path(&self, model: Arc<ObjectCentricPetriNet>) -> String {
+        self.action_path.iter().filter_map(|action| {
+            match **action {
+                SearchNodeAction::FireTransition(ref transition_id, ref binding) => {
+                    let transition_name = model.get_transition(transition_id).unwrap().name.clone();
+                    let binding_info: Vec<String> = binding.object_binding_info.iter().map(|(object_type, binding_info)| {
+                        let tokens: Vec<String> = binding_info.tokens.iter().map(|token| token.id.to_string()).collect();
+                        format!("{}: [{}]", object_type.to_string(), tokens.join(", "))
+                    }).collect();
+                    Some(format!("{} ({})", transition_name, binding_info.join(", ")))
+                }
+                _ => None,
+            }
+        }).collect::<Vec<String>>().join(" -> ")
     }
 }
 
@@ -279,7 +295,7 @@ impl ModelCaseChecker {
             new_partial_case,
             0 as f64,
             None,
-            SearchNodeAction::VOID,
+            vec![Arc::new(SearchNodeAction::VOID)],
         )
     }
 
@@ -321,7 +337,7 @@ impl ModelCaseChecker {
                 shortest_case.clone(),
                 global_upper_bound,
                 None,
-                SearchNodeAction::VOID,
+                vec![Arc::new(SearchNodeAction::VOID)],
             ));
         }
 
@@ -333,7 +349,7 @@ impl ModelCaseChecker {
                 initial_marking.clone(),
                 static_void_cost,
             )
-            .into(),
+                .into(),
         );
 
         // let mut open_list: Vec<SearchNode> = vec![
@@ -356,7 +372,7 @@ impl ModelCaseChecker {
         // save current time
         let mut most_recent_timestamp = std::time::Instant::now();
         let beginning_timestamp = most_recent_timestamp;
-        while let Some(mut current_node) = open_list.pop() {
+        while let Some(current_node) = open_list.pop() {
             let current_node: SearchNode = current_node.into();
 
             if current_node.min_cost >= global_upper_bound {
@@ -375,56 +391,56 @@ impl ModelCaseChecker {
                 println!("Current node min cost: {}", current_node.min_cost);
                 println!("Global Upper Bound: {}", global_upper_bound);
                 println!("---------------------");
-                println!("Current node partial case stats:");
-                current_node.partial_case_stats.pretty_print_stats();
-                println!("---------------------");
-                println!("Query Case Stats:");
-                query_case_stats.pretty_print_stats();
-                println!("---------------------");
-                println!("Stats difference");
-                // for each hashmap entry print the difference like in calculate_min_cost
-                for (event_type, &partial_count) in
-                    &current_node.partial_case_stats.query_event_counts
-                {
-                    let query_count = query_case_stats
-                        .query_event_counts
-                        .get(event_type)
-                        .unwrap_or(&0);
-                    println!(
-                        "Event: {} Difference: {}",
-                        event_type,
-                        (partial_count as f64 - *query_count as f64)
-                    );
-                }
-                // for each edge do the same
-                for ((edge_type, a, b), &partial_count) in
-                    &current_node.partial_case_stats.edge_type_counts
-                {
-                    let query_count = query_case_stats
-                        .edge_type_counts
-                        .get(&(*edge_type, *a, *b))
-                        .unwrap_or(&0);
-                    let type_storage = TYPE_STORAGE.read().unwrap();
-                    println!(
-                        "Edge: ({:?},{},{}) Difference: {}",
-                        edge_type,
-                        type_storage.get_type_name(*a).unwrap(),
-                        type_storage.get_type_name(*b).unwrap(),
-                        (partial_count as f64 - *query_count as f64)
-                    );
-                }
-
-                // print number of tokens in initial places of the current node marking
-                let initial_place_names: Vec<String> = self
-                    .model
-                    .get_initial_places()
-                    .iter()
-                    .map(|p| p.object_type.clone())
-                    .collect::<HashSet<_>>() // Remove duplicates
-                    .into_iter()
-                    .collect();
-                let counts = current_node.marking.get_initial_counts_per_type();
-                println!("Tokens in initial places: {:?}", counts);
+                // println!("Current node partial case stats:");
+                // current_node.partial_case_stats.pretty_print_stats();
+                // println!("---------------------");
+                // println!("Query Case Stats:");
+                // query_case_stats.pretty_print_stats();
+                // println!("---------------------");
+                // println!("Stats difference");
+                // // for each hashmap entry print the difference like in calculate_min_cost
+                // for (event_type, &partial_count) in
+                //     &current_node.partial_case_stats.query_event_counts
+                // {
+                //     let query_count = query_case_stats
+                //         .query_event_counts
+                //         .get(event_type)
+                //         .unwrap_or(&0);
+                //     println!(
+                //         "Event: {} Difference: {}",
+                //         event_type,
+                //         (partial_count as f64 - *query_count as f64)
+                //     );
+                // }
+                // // for each edge do the same
+                // for ((edge_type, a, b), &partial_count) in
+                //     &current_node.partial_case_stats.edge_type_counts
+                // {
+                //     let query_count = query_case_stats
+                //         .edge_type_counts
+                //         .get(&(*edge_type, *a, *b))
+                //         .unwrap_or(&0);
+                //     let type_storage = TYPE_STORAGE.read().unwrap();
+                //     println!(
+                //         "Edge: ({:?},{},{}) Difference: {}",
+                //         edge_type,
+                //         type_storage.get_type_name(*a).unwrap(),
+                //         type_storage.get_type_name(*b).unwrap(),
+                //         (partial_count as f64 - *query_count as f64)
+                //     );
+                // }
+                //
+                // // print number of tokens in initial places of the current node marking
+                // let initial_place_names: Vec<String> = self
+                //     .model
+                //     .get_initial_places()
+                //     .iter()
+                //     .map(|p| p.object_type.clone())
+                //     .collect::<HashSet<_>>() // Remove duplicates
+                //     .into_iter()
+                //     .collect();
+                // let counts = current_node.marking.get_initial_counts_per_type();
+                // println!("Tokens in initial places: {:?}", counts);
                 println!("depth: {}", current_node.depth);
 
                 // save an intermediate result as an image in ./intermediates
@@ -521,6 +537,19 @@ impl ModelCaseChecker {
                 // print a list of type names of void nodes
 
                 let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
+                //ensure dir exists
+                std::fs::create_dir_all("./alignments").unwrap();
+                export_c2_with_alignment_image(
+                    &current_node.partial_case,
+                    &alignment,
+                    format!("./alignments/alignment_{}_cost_{}_min_{}.png", counter, alignment_cost, current_node.min_cost).as_str(),
+                    Format::Png,
+                    Some(2.0),
+                ).unwrap();
+                
+                // print the action path
+                println!("Action path for count {}: {}", counter, current_node.action_path(self.model.clone()));
+
                 // println!("Final marking reached after exploring {} nodes", counter);
                 // println!("Cost: {}", alignment_cost);
                 // println!(
@@ -622,7 +651,7 @@ impl ModelCaseChecker {
                 if (self.model_transitions.contains(&type_name.to_string())) {
                     more_epsilon_than_void = false;
                     break;
-                } else { 
+                } else {
                     println!("false!!!!!")
                 }
             } else if (*partial_count < query_count && edge_type.eq(&EdgeType::E2O)) {
@@ -866,7 +895,9 @@ impl ModelCaseChecker {
 
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
         //println!("GEtting initial places");
-        if (node.action.is_pre_firing()) {
+        // get last entry of node.action_path
+
+        if (node.action_path.last().unwrap().is_pre_firing()) {
             println!("Pre firing");
             // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
             // this is because we can only add tokens to the initial places in lexicographical order
@@ -884,7 +915,7 @@ impl ModelCaseChecker {
                 .collect();
 
             initial_place_names.sort(); // Sort lexicographically
-                                        //initial_place_names.reverse();
+            //initial_place_names.reverse();
 
             let mut initial_places = self.model.get_initial_places().clone();
             //initial_places = next_permutation(&initial_places);
@@ -962,13 +993,15 @@ impl ModelCaseChecker {
                         &new_marking,
                     );
                     self.token_graph_id_mapping.insert(token_ids[0], object_id);
-
+                    let mut new_action_path = node.action_path.clone();
+                    let new_action = Arc::new(SearchNodeAction::add_token(place.id.clone()));
+                    new_action_path.push(new_action);
                     children.push(SearchNode::new_with_stats(
                         new_marking,
                         new_partial_case,
                         min_cost,
                         None,
-                        SearchNodeAction::add_token(place.id.clone()),
+                        new_action_path,
                         new_partial_case_stats,
                         node.depth + 1,
                         None,
@@ -998,16 +1031,15 @@ impl ModelCaseChecker {
             }
 
             transition_enabled.insert(transition.id, firing_combinations.len() > 0);
-            let firing_combinations : Vec<Arc<Binding>> = firing_combinations.into_iter().map(Arc::new).collect();
+            let firing_combinations: Vec<Arc<Binding>> = firing_combinations.into_iter().map(Arc::new).collect();
 
             if (!transition.silent) {
                 forbidden_firings_per_transition.insert(transition.id, firing_combinations.iter().cloned().collect());
             }
-            
-            firing_combinations_per_transition.insert(transition.id, firing_combinations);
 
+            firing_combinations_per_transition.insert(transition.id, firing_combinations);
         }
-        
+
 
         if let Some(forbidden_firings_previous) = &node.forbidden_firings {
             // if this is the case, merge forbidden_firings_per_transition with forbidden_firings_previous
@@ -1041,7 +1073,7 @@ impl ModelCaseChecker {
 
             // filter out forbidden firings, meaning filter out all bindings from filteredCombinations that are in searchNode.forbiddenFirings
 
-            let filtered_forbidden_combinations = match &node.forbidden_firings {
+            let mut filtered_forbidden_combinations = match &node.forbidden_firings {
                 Some(forbidden_firings_per_t) => {
                     let forbidden_firings = forbidden_firings_per_t.get(&transition.id);
                     if (forbidden_firings.is_none()) {
@@ -1067,10 +1099,15 @@ impl ModelCaseChecker {
             if (filtered_out_len > 0) {
                 //println!("Filtered out {} forbidden combinations", filtered_out_len);
             }
-
+            
+            if (transition.silent) {
+                filtered_forbidden_combinations.sort_by(|a, b| compare_bindings(a, b));
+            }
+            
             filtered_forbidden_combinations
                 .iter()
-                .for_each(|combination| {
+                .enumerate()
+                .for_each(|(index, combination)| {
                     let mut new_marking = node.marking.clone();
                     let mut new_partial_case = node.partial_case.clone();
 
@@ -1203,20 +1240,30 @@ impl ModelCaseChecker {
                     }
 
                     let forbidden_firings = if (transition.silent) {
-                        Some(forbidden_firings_per_transition.clone())
+                        let mut base = forbidden_firings_per_transition.clone();
+                        // add all combinations from index 0 to index to forbidden firings
+                        // select them from filtered_forbidden_combinations
+                        let forbidden_firings = filtered_forbidden_combinations[..index].to_vec();
+                        if(!forbidden_firings.is_empty()) {
+                            base.insert(transition.id, forbidden_firings);
+                        }
+                        Some(base)
                     } else {
                         None
                     };
 
+                    let mut new_action_path = node.action_path.clone();
+                    let new_action = Arc::new(SearchNodeAction::fire_transition(
+                        transition.id,
+                        combination.clone().clone(),
+                    ));
+                    new_action_path.push(new_action);
                     transition_children.push(SearchNode::new_with_stats(
                         new_marking,
                         new_partial_case,
                         new_cost,
                         most_recent_event_id,
-                        SearchNodeAction::fire_transition(
-                            transition.id,
-                            combination.clone().clone(),
-                        ),
+                        new_action_path,
                         new_partial_case_stats,
                         node.depth + 1,
                         forbidden_firings,
@@ -1225,7 +1272,7 @@ impl ModelCaseChecker {
         }
         //println!("done getting transitions");
         // places are allowed to be dead as long as we keep adding tokens to alive them ;)
-        if (!node.action.is_pre_firing()) {
+        if (!node.action_path.last().unwrap().is_pre_firing()) {
             if !node
                 .marking
                 .has_dead_places(&transition_enabled, &self.reachability_cache)
@@ -1257,7 +1304,7 @@ impl ModelCaseChecker {
         transition_children.sort_by(|a, b| {
             // prioritize transitions that have a higher difference between the case stats and the query case stats
             // all actions in this list are transitions
-            let transition_a = a.action.transition_id().unwrap();
+            let transition_a = a.action_path.last().unwrap().transition_id().unwrap();
 
             let transition_type = &self.model.get_transition(&transition_a).unwrap().event_type;
 
@@ -1266,11 +1313,11 @@ impl ModelCaseChecker {
                 .get(transition_type)
                 .unwrap_or(&0) as i64
                 - *a.partial_case_stats
-                    .query_event_counts
-                    .get(transition_type)
-                    .unwrap_or(&0) as i64;
+                .query_event_counts
+                .get(transition_type)
+                .unwrap_or(&0) as i64;
 
-            let transition_b = b.action.transition_id().unwrap();
+            let transition_b = b.action_path.last().unwrap().transition_id().unwrap();
             let transition_type = &self.model.get_transition(&transition_b).unwrap().event_type;
 
             let difference_b = *query_case_stats
@@ -1278,9 +1325,9 @@ impl ModelCaseChecker {
                 .get(transition_type)
                 .unwrap_or(&0) as i64
                 - *b.partial_case_stats
-                    .query_event_counts
-                    .get(transition_type)
-                    .unwrap_or(&0) as i64;
+                .query_event_counts
+                .get(transition_type)
+                .unwrap_or(&0) as i64;
 
             difference_a.partial_cmp(&difference_b).unwrap()
         });
@@ -1288,6 +1335,38 @@ impl ModelCaseChecker {
         //children.append(&mut transition_children);
         //children
     }
+}
+fn compare_bindings(a: &Arc<Binding>, b: &Arc<Binding>) -> Ordering {
+    // Collect and sort object types once
+    let mut object_types: Vec<&ObjectType> = a.object_binding_info.keys().collect();
+    object_types.sort_unstable();
+
+    for object_type in object_types {
+        let a_tokens = &a.object_binding_info[object_type].tokens;
+        let b_tokens = &b.object_binding_info[object_type].tokens;
+
+        // Check if the number of tokens differs
+        if a_tokens.len() != b_tokens.len() {
+            return a_tokens.len().cmp(&b_tokens.len());
+        }
+
+        // Compare sorted token IDs
+        let mut a_sorted = a_tokens.iter().map(|t| t.id).collect::<Vec<_>>();
+        let mut b_sorted = b_tokens.iter().map(|t| t.id).collect::<Vec<_>>();
+        a_sorted.sort_unstable();
+        b_sorted.sort_unstable();
+
+        for (&a_id, &b_id) in a_sorted.iter().zip(b_sorted.iter()) {
+            match a_id.cmp(&b_id) {
+                Ordering::Less => return Ordering::Less,
+                Ordering::Greater => return Ordering::Greater,
+                Ordering::Equal => continue,
+            }
+        }
+    }
+
+    // All object types and their tokens are equal
+    Ordering::Equal
 }
 
 #[cfg(test)]
@@ -1390,7 +1469,7 @@ mod tests {
         let case_file = fs::read_to_string(
             "./src/oc_case/test_data/variant_6eb2da5f3f3f7ea94ca51f1a72de8f47.jsonocel",
         )
-        .expect("Unable to read file");
+            .expect("Unable to read file");
 
         let mut query_case = json_to_case_graph(case_file.as_str());
 
@@ -1423,9 +1502,9 @@ mod tests {
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
             let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/what",
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/fivetimeout",
             )
-            .unwrap();
+                .unwrap();
             let visualized_dir =
                 Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
             for (case_graph, path) in case_graph_iter {
@@ -1455,7 +1534,7 @@ mod tests {
                         Format::Png,
                         Some(2.0),
                     )
-                    .unwrap();
+                        .unwrap();
 
                     export_case_graph_image(
                         &result_node.partial_case,
