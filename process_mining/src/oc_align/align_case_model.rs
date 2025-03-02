@@ -538,17 +538,17 @@ impl ModelCaseChecker {
 
                 let alignment_cost = alignment.total_cost().unwrap_or(f64::INFINITY);
                 //ensure dir exists
-                std::fs::create_dir_all("./alignments").unwrap();
-                export_c2_with_alignment_image(
-                    &current_node.partial_case,
-                    &alignment,
-                    format!("./alignments/alignment_{}_cost_{}_min_{}.png", counter, alignment_cost, current_node.min_cost).as_str(),
-                    Format::Png,
-                    Some(2.0),
-                ).unwrap();
-                
-                // print the action path
-                println!("Action path for count {}: {}", counter, current_node.action_path(self.model.clone()));
+                // std::fs::create_dir_all("./alignments").unwrap();
+                // export_c2_with_alignment_image(
+                //     &current_node.partial_case,
+                //     &alignment,
+                //     format!("./alignments/alignment_{}_cost_{}_min_{}.png", counter, alignment_cost, current_node.min_cost).as_str(),
+                //     Format::Png,
+                //     Some(2.0),
+                // ).unwrap();
+                // 
+                // // print the action path
+                // println!("Action path for count {}: {}", counter, current_node.action_path(self.model.clone()));
 
                 // println!("Final marking reached after exploring {} nodes", counter);
                 // println!("Cost: {}", alignment_cost);
@@ -1243,10 +1243,29 @@ impl ModelCaseChecker {
                         let mut base = forbidden_firings_per_transition.clone();
                         // add all combinations from index 0 to index to forbidden firings
                         // select them from filtered_forbidden_combinations
+                        // -> symmetry-breaking
                         let forbidden_firings = filtered_forbidden_combinations[..index].to_vec();
                         if(!forbidden_firings.is_empty()) {
-                            base.insert(transition.id, forbidden_firings);
+                            base.entry(transition.id).or_insert_with(|| vec![]).extend(forbidden_firings);
                         }
+                        // now, also forbid all combinations from all silent transitions with a higher lexicographical order
+                        // which are also firable in this node
+                        // first, sort all silent transitions lexicograhically by name
+                        
+                        let mut sorted_silent_transitions: Vec<&Transition> = self.model.transitions.values().filter(|t| t.silent).collect();
+                        sorted_silent_transitions.sort_by(|a, b| a.id.cmp(&b.id));
+                        
+                        // now, iterate over all silent transitions with a higher lexicographical order
+                        // and add all firable combinations to the forbidden firings
+                        for silent_transition in sorted_silent_transitions {
+                            if (silent_transition.id <= transition.id) {
+                                continue;
+                            }
+                            let firable_combinations = firing_combinations_per_transition.get(&silent_transition.id).unwrap();
+                            // todo consider filtering out forbidden firings
+                            base.entry(silent_transition.id).or_insert_with(|| vec![]).extend(firable_combinations.iter().cloned());
+                        }
+                        
                         Some(base)
                     } else {
                         None
