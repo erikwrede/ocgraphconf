@@ -85,10 +85,17 @@ impl ReachabilityCache {
                 for output_arc in &transition.output_arcs {
                     let next_place_id = output_arc.target_place_id;
 
+                    // make sure the output place has the same object type as the input place
+                    let next_place = self.petri_net.get_place(&next_place_id).unwrap();
+                    if next_place.oc_object_type != place.oc_object_type {
+                        continue;
+                    }
+                    
                     // If we've reached the target place, return true.
                     if &next_place_id == to_place_id {
                         return true;
                     }
+                    
 
                     // If not visited, add to the queue.
                     if visited_places.insert(next_place_id.clone()) {
