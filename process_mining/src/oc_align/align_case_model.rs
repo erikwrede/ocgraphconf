@@ -571,127 +571,6 @@ impl ModelCaseChecker {
                 // );
                 //panic!("Final marking reached");
                 // Limit the scope of the mutable borrow using a separate block
-
-                // print a list of edges in query_case_stats where query_count > partial_count
-                for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
-                    let partial_count = current_node
-                        .partial_case_stats
-                        .edge_type_counts
-                        .get(&(*edge_type, *a, *b))
-                        .unwrap_or(&0);
-                    if (*partial_count < query_count) {
-                        let ev_type: EventType = "Validate".into();
-                        if (a == &ev_type.0) {
-                            continue;
-                        }
-                        let type_storage = TYPE_STORAGE.read().unwrap();
-
-                        if (*edge_type == EdgeType::DF) {
-                            // get transitions that have the event types a , b
-                            let a_type: EventType = a.clone().into();
-                            let b_type: EventType = b.clone().into();
-
-                            let a_transition = self
-                                .model
-                                .transitions
-                                .values()
-                                .find(|t| t.event_type == a_type);
-                            let b_transition = self
-                                .model
-                                .transitions
-                                .values()
-                                .find(|t| t.event_type == b_type);
-
-                            // get all input places to b and their object types
-                            let b_input_places = b_transition
-                                .unwrap()
-                                .input_arcs
-                                .iter()
-                                .map(|arc| arc.source_place_id)
-                                .collect::<Vec<_>>();
-                            let mut b_input_object_types = b_input_places
-                                .iter()
-                                .map(|place_id| {
-                                    (
-                                        (
-                                            place_id.clone()/*,
-                                            self.model
-                                                .get_place(place_id)
-                                                .unwrap()
-                                                .oc_object_type
-                                                .clone(),*/
-                                        ),
-                                        false,
-                                    )
-                                })
-                                .collect::<HashMap<_, _>>();
-
-                            // check b reachable from any place with a token using reachability cache
-
-                            current_node
-                                .marking
-                                .assignments
-                                .iter()
-                                .filter(|(place_id, tokens)| tokens.len() > 0)
-                                .for_each(|(place_id, tokens)| {
-                                    for (place_id_b) in &b_input_places {
-                                        if self
-                                            .reachability_cache
-                                            .is_reachable(place_id, place_id_b)
-                                        {
-                                            b_input_object_types.insert(place_id_b.clone(), true);
-                                            
-                                            let place_name = self
-                                                .model
-                                                .get_place(place_id)
-                                                .unwrap()
-                                                .name
-                                                .clone()
-                                                .unwrap_or("".to_string());
-                                            let place_name_b = self
-                                                .model
-                                                .get_place(place_id_b)
-                                                .unwrap()
-                                                .name
-                                                .clone()
-                                                .unwrap_or("".to_string());
-                                            println!(
-                                                "Place {} is reachable from place {}",
-                                                place_name, place_name_b
-                                            );
-                                        }
-                                    }
-                                });
-                            let all_reachable = b_input_object_types.values().all(|v| *v);
-
-                            println!(
-                                "Edge: ({:?},{},{}) Difference: {}, reachable: {}",
-                                edge_type,
-                                type_storage.get_type_name(*a).unwrap(),
-                                type_storage.get_type_name(*b).unwrap(),
-                                (query_count as f64 - *partial_count as f64),
-                                all_reachable
-                            );
-                        }
-                    }
-
-                    if alignment_cost < global_upper_bound {
-                        // log that new best bound has been found
-                        println!("New best bound found: {}", alignment_cost);
-
-                        global_upper_bound = alignment_cost;
-                        best_node = Some(current_node.clone());
-                        let len = open_list
-                            .iter()
-                            .filter(|node| node.0.min_cost >= global_upper_bound)
-                            .count();
-
-                        // println!("Number of nodes pruned due to best bound: {}", len);
-
-                        // remove all nodes that have a cost higher than the new upper bound
-                        //open_list.retain(|node| node.0.min_cost < global_upper_bound);
-                    }
-                }
             }
 
             if (generate_children) {
@@ -813,7 +692,91 @@ impl ModelCaseChecker {
             //println!("More_epsilon_cost: {}", more_epsilon_cost)
         }
 
-        total_cost + static_cost + more_epsilon_cost
+        let mut added_void_cost = 0.0;
+        let mut unreachable_events: HashSet<EventType> = HashSet::new();
+        // print a list of edges in query_case_stats where query_count > partial_count
+        for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
+            if (*edge_type == EdgeType::DF) {
+                let partial_count = partial_case_stats
+                    .edge_type_counts
+                    .get(&(*edge_type, *a, *b))
+                    .unwrap_or(&0);
+                let difference = query_count - partial_count;
+                if (difference > 0) {
+                    let b_type: EventType = b.clone().into();
+
+                    let b_transition = self
+                        .model
+                        .transitions
+                        .values()
+                        .find(|t| t.event_type == b_type);
+
+                    // get all input places to b and their object types
+                    let b_input_places = b_transition
+                        .unwrap()
+                        .input_arcs
+                        .iter()
+                        .map(|arc| arc.source_place_id)
+                        .collect::<Vec<_>>();
+                    let mut b_input_object_types = b_input_places
+                        .iter()
+                        .map(|place_id| {
+                            (
+                                (place_id.clone()/*,
+                                self.model
+                                    .get_place(place_id)
+                                    .unwrap()
+                                    .oc_object_type
+                                    .clone(),*/),
+                                false,
+                            )
+                        })
+                        .collect::<HashMap<_, _>>();
+
+                    // check b reachable from any place with a token using reachability cache
+
+                    marking
+                        .assignments
+                        .iter()
+                        .filter(|(place_id, tokens)| tokens.len() > 0)
+                        .for_each(|(place_id, tokens)| {
+                            for (place_id_b) in &b_input_places {
+                                if self.reachability_cache.is_reachable(place_id, place_id_b) {
+                                    b_input_object_types.insert(place_id_b.clone(), true);
+                                }
+                            }
+                        });
+                    let all_reachable = b_input_object_types.values().all(|v| *v);
+
+                    if (!all_reachable) {
+                        added_void_cost += difference as f64;
+                        unreachable_events.insert(b_type);
+                    }
+                }
+            }
+        }
+        
+        let mut added_void_event_cost = 0.0;
+        if (!unreachable_events.is_empty()) {
+            for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
+                if (*edge_type == EdgeType::E2O && unreachable_events.contains(&a.clone().into())) {
+                    let partial_count = partial_case_stats
+                        .edge_type_counts
+                        .get(&(*edge_type, *a, *b))
+                        .unwrap_or(&0);
+                    let difference = query_count - partial_count;
+                    if (difference > 0) {
+                        added_void_event_cost += difference as f64;
+                    }
+                }
+            }
+        }
+
+        //if (added_void_event_cost > 0.0) {
+        //    println!("Added void cost: {}", added_void_event_cost);
+        //}
+
+        total_cost + static_cost + more_epsilon_cost + added_void_cost + added_void_event_cost
     }
 
     fn more_epsilon_than_void_with_debug(&self, marking: &Marking) {
