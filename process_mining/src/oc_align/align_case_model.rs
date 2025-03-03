@@ -571,6 +571,23 @@ impl ModelCaseChecker {
                 // );
                 //panic!("Final marking reached");
                 // Limit the scope of the mutable borrow using a separate block
+
+                if alignment_cost < global_upper_bound {
+                    // log that new best bound has been found
+                    println!("New best bound found: {}", alignment_cost);
+
+                    global_upper_bound = alignment_cost;
+                    best_node = Some(current_node.clone());
+                    let len = open_list
+                        .iter()
+                        .filter(|node| node.0.min_cost >= global_upper_bound)
+                        .count();
+
+                    // println!("Number of nodes pruned due to best bound: {}", len);
+
+                    // remove all nodes that have a cost higher than the new upper bound
+                    //open_list.retain(|node| node.0.min_cost < global_upper_bound);
+                }
             }
 
             if (generate_children) {
@@ -701,7 +718,7 @@ impl ModelCaseChecker {
                     .edge_type_counts
                     .get(&(*edge_type, *a, *b))
                     .unwrap_or(&0);
-                let difference = query_count - partial_count;
+                let difference : isize = query_count as isize - *partial_count as isize;
                 if (difference > 0) {
                     let b_type: EventType = b.clone().into();
 
@@ -755,7 +772,7 @@ impl ModelCaseChecker {
                 }
             }
         }
-        
+
         let mut added_void_event_cost = 0.0;
         if (!unreachable_events.is_empty()) {
             for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
@@ -764,7 +781,7 @@ impl ModelCaseChecker {
                         .edge_type_counts
                         .get(&(*edge_type, *a, *b))
                         .unwrap_or(&0);
-                    let difference = query_count - partial_count;
+                    let difference: isize = query_count as isize - *partial_count as isize;
                     if (difference > 0) {
                         added_void_event_cost += difference as f64;
                     }
@@ -1619,7 +1636,7 @@ mod tests {
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
             let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/difference",
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/costcut",
             )
             .unwrap();
             let visualized_dir =
@@ -1643,6 +1660,7 @@ mod tests {
                     let alignment =
                         CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
                     let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
+                    println!("Cost: {}", cost);
                     export_c2_with_alignment_image(
                         &result_node.partial_case,
                         &alignment,
