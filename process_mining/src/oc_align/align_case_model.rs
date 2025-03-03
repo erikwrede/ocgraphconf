@@ -6,7 +6,7 @@ use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Ob
 use crate::oc_case::visualization::export_case_graph_image;
 use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
 use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
-use crate::type_storage::{ObjectType, TYPE_STORAGE};
+use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 use graphviz_rust::cmd::Format;
 use std::any::Any;
 use std::cmp::{Ordering, PartialEq};
@@ -110,19 +110,29 @@ impl SearchNode {
     }
 
     fn action_path(&self, model: Arc<ObjectCentricPetriNet>) -> String {
-        self.action_path.iter().filter_map(|action| {
-            match **action {
+        self.action_path
+            .iter()
+            .filter_map(|action| match **action {
                 SearchNodeAction::FireTransition(ref transition_id, ref binding) => {
                     let transition_name = model.get_transition(transition_id).unwrap().name.clone();
-                    let binding_info: Vec<String> = binding.object_binding_info.iter().map(|(object_type, binding_info)| {
-                        let tokens: Vec<String> = binding_info.tokens.iter().map(|token| token.id.to_string()).collect();
-                        format!("{}: [{}]", object_type.to_string(), tokens.join(", "))
-                    }).collect();
+                    let binding_info: Vec<String> = binding
+                        .object_binding_info
+                        .iter()
+                        .map(|(object_type, binding_info)| {
+                            let tokens: Vec<String> = binding_info
+                                .tokens
+                                .iter()
+                                .map(|token| token.id.to_string())
+                                .collect();
+                            format!("{}: [{}]", object_type.to_string(), tokens.join(", "))
+                        })
+                        .collect();
                     Some(format!("{} ({})", transition_name, binding_info.join(", ")))
                 }
                 _ => None,
-            }
-        }).collect::<Vec<String>>().join(" -> ")
+            })
+            .collect::<Vec<String>>()
+            .join(" -> ")
     }
 }
 
@@ -349,7 +359,7 @@ impl ModelCaseChecker {
                 initial_marking.clone(),
                 static_void_cost,
             )
-                .into(),
+            .into(),
         );
 
         // let mut open_list: Vec<SearchNode> = vec![
@@ -385,7 +395,10 @@ impl ModelCaseChecker {
                 most_recent_timestamp = std::time::Instant::now();
                 println!("===================== Progress update =====================");
                 println!("Nodes explored: {}", counter);
-                println!("Exploration rate: {} nodes per second", counter as f64 / beginning_timestamp.elapsed().as_secs_f64());
+                println!(
+                    "Exploration rate: {} nodes per second",
+                    counter as f64 / beginning_timestamp.elapsed().as_secs_f64()
+                );
                 println!("Nodes aligned: {}", mip_counter);
                 println!("Open list length: {}", open_list.len());
                 println!("Current node min cost: {}", current_node.min_cost);
@@ -546,7 +559,7 @@ impl ModelCaseChecker {
                 //     Format::Png,
                 //     Some(2.0),
                 // ).unwrap();
-                // 
+                //
                 // // print the action path
                 // println!("Action path for count {}: {}", counter, current_node.action_path(self.model.clone()));
 
@@ -558,21 +571,126 @@ impl ModelCaseChecker {
                 // );
                 //panic!("Final marking reached");
                 // Limit the scope of the mutable borrow using a separate block
-                if alignment_cost < global_upper_bound {
-                    // log that new best bound has been found
-                    println!("New best bound found: {}", alignment_cost);
 
-                    global_upper_bound = alignment_cost;
-                    best_node = Some(current_node.clone());
-                    let len = open_list
-                        .iter()
-                        .filter(|node| node.0.min_cost >= global_upper_bound)
-                        .count();
+                // print a list of edges in query_case_stats where query_count > partial_count
+                for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
+                    let partial_count = current_node
+                        .partial_case_stats
+                        .edge_type_counts
+                        .get(&(*edge_type, *a, *b))
+                        .unwrap_or(&0);
+                    if (*partial_count < query_count) {
+                        let ev_type: EventType = "Validate".into();
+                        if (a == &ev_type.0) {
+                            continue;
+                        }
+                        let type_storage = TYPE_STORAGE.read().unwrap();
 
-                    // println!("Number of nodes pruned due to best bound: {}", len);
+                        if (*edge_type == EdgeType::DF) {
+                            // get transitions that have the event types a , b
+                            let a_type: EventType = a.clone().into();
+                            let b_type: EventType = b.clone().into();
 
-                    // remove all nodes that have a cost higher than the new upper bound
-                    //open_list.retain(|node| node.0.min_cost < global_upper_bound);
+                            let a_transition = self
+                                .model
+                                .transitions
+                                .values()
+                                .find(|t| t.event_type == a_type);
+                            let b_transition = self
+                                .model
+                                .transitions
+                                .values()
+                                .find(|t| t.event_type == b_type);
+
+                            // get all input places to b and their object types
+                            let b_input_places = b_transition
+                                .unwrap()
+                                .input_arcs
+                                .iter()
+                                .map(|arc| arc.source_place_id)
+                                .collect::<Vec<_>>();
+                            let mut b_input_object_types = b_input_places
+                                .iter()
+                                .map(|place_id| {
+                                    (
+                                        (
+                                            place_id.clone()/*,
+                                            self.model
+                                                .get_place(place_id)
+                                                .unwrap()
+                                                .oc_object_type
+                                                .clone(),*/
+                                        ),
+                                        false,
+                                    )
+                                })
+                                .collect::<HashMap<_, _>>();
+
+                            // check b reachable from any place with a token using reachability cache
+
+                            current_node
+                                .marking
+                                .assignments
+                                .iter()
+                                .filter(|(place_id, tokens)| tokens.len() > 0)
+                                .for_each(|(place_id, tokens)| {
+                                    for (place_id_b) in &b_input_places {
+                                        if self
+                                            .reachability_cache
+                                            .is_reachable(place_id, place_id_b)
+                                        {
+                                            b_input_object_types.insert(place_id_b.clone(), true);
+                                            
+                                            let place_name = self
+                                                .model
+                                                .get_place(place_id)
+                                                .unwrap()
+                                                .name
+                                                .clone()
+                                                .unwrap_or("".to_string());
+                                            let place_name_b = self
+                                                .model
+                                                .get_place(place_id_b)
+                                                .unwrap()
+                                                .name
+                                                .clone()
+                                                .unwrap_or("".to_string());
+                                            println!(
+                                                "Place {} is reachable from place {}",
+                                                place_name, place_name_b
+                                            );
+                                        }
+                                    }
+                                });
+                            let all_reachable = b_input_object_types.values().all(|v| *v);
+
+                            println!(
+                                "Edge: ({:?},{},{}) Difference: {}, reachable: {}",
+                                edge_type,
+                                type_storage.get_type_name(*a).unwrap(),
+                                type_storage.get_type_name(*b).unwrap(),
+                                (query_count as f64 - *partial_count as f64),
+                                all_reachable
+                            );
+                        }
+                    }
+
+                    if alignment_cost < global_upper_bound {
+                        // log that new best bound has been found
+                        println!("New best bound found: {}", alignment_cost);
+
+                        global_upper_bound = alignment_cost;
+                        best_node = Some(current_node.clone());
+                        let len = open_list
+                            .iter()
+                            .filter(|node| node.0.min_cost >= global_upper_bound)
+                            .count();
+
+                        // println!("Number of nodes pruned due to best bound: {}", len);
+
+                        // remove all nodes that have a cost higher than the new upper bound
+                        //open_list.retain(|node| node.0.min_cost < global_upper_bound);
+                    }
                 }
             }
 
@@ -915,7 +1033,7 @@ impl ModelCaseChecker {
                 .collect();
 
             initial_place_names.sort(); // Sort lexicographically
-            //initial_place_names.reverse();
+                                        //initial_place_names.reverse();
 
             let mut initial_places = self.model.get_initial_places().clone();
             //initial_places = next_permutation(&initial_places);
@@ -1017,7 +1135,8 @@ impl ModelCaseChecker {
         //
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
 
-        let mut firing_combinations_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> = HashMap::new();
+        let mut firing_combinations_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> =
+            HashMap::new();
 
         let mut forbidden_firings_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> = HashMap::new();
 
@@ -1031,15 +1150,16 @@ impl ModelCaseChecker {
             }
 
             transition_enabled.insert(transition.id, firing_combinations.len() > 0);
-            let firing_combinations: Vec<Arc<Binding>> = firing_combinations.into_iter().map(Arc::new).collect();
+            let firing_combinations: Vec<Arc<Binding>> =
+                firing_combinations.into_iter().map(Arc::new).collect();
 
             if (!transition.silent) {
-                forbidden_firings_per_transition.insert(transition.id, firing_combinations.iter().cloned().collect());
+                forbidden_firings_per_transition
+                    .insert(transition.id, firing_combinations.iter().cloned().collect());
             }
 
             firing_combinations_per_transition.insert(transition.id, firing_combinations);
         }
-
 
         if let Some(forbidden_firings_previous) = &node.forbidden_firings {
             // if this is the case, merge forbidden_firings_per_transition with forbidden_firings_previous
@@ -1099,11 +1219,11 @@ impl ModelCaseChecker {
             if (filtered_out_len > 0) {
                 //println!("Filtered out {} forbidden combinations", filtered_out_len);
             }
-            
+
             if (transition.silent) {
                 filtered_forbidden_combinations.sort_by(|a, b| compare_bindings(a, b));
             }
-            
+
             filtered_forbidden_combinations
                 .iter()
                 .enumerate()
@@ -1201,7 +1321,9 @@ impl ModelCaseChecker {
                         for ((edge_type, a, b), &partial_count) in
                             &node.partial_case_stats.edge_type_counts
                         {
-                            if edge_type.ne(&EdgeType::E2O) { continue; }
+                            if edge_type.ne(&EdgeType::E2O) {
+                                continue;
+                            }
                             let query_count = query_case_stats
                                 .edge_type_counts
                                 .get(&(*edge_type, *a, *b))
@@ -1220,7 +1342,9 @@ impl ModelCaseChecker {
                         for ((edge_type, a, b), &partial_count) in
                             &new_partial_case_stats.edge_type_counts
                         {
-                            if edge_type.ne(&EdgeType::E2O) { continue; }
+                            if edge_type.ne(&EdgeType::E2O) {
+                                continue;
+                            }
                             let query_count = query_case_stats
                                 .edge_type_counts
                                 .get(&(*edge_type, *a, *b))
@@ -1245,27 +1369,38 @@ impl ModelCaseChecker {
                         // select them from filtered_forbidden_combinations
                         // -> symmetry-breaking
                         let forbidden_firings = filtered_forbidden_combinations[..index].to_vec();
-                        if(!forbidden_firings.is_empty()) {
-                            base.entry(transition.id).or_insert_with(|| vec![]).extend(forbidden_firings);
+                        if (!forbidden_firings.is_empty()) {
+                            base.entry(transition.id)
+                                .or_insert_with(|| vec![])
+                                .extend(forbidden_firings);
                         }
                         // now, also forbid all combinations from all silent transitions with a higher lexicographical order
                         // which are also firable in this node
                         // first, sort all silent transitions lexicograhically by name
-                        
-                        let mut sorted_silent_transitions: Vec<&Transition> = self.model.transitions.values().filter(|t| t.silent).collect();
+
+                        let mut sorted_silent_transitions: Vec<&Transition> = self
+                            .model
+                            .transitions
+                            .values()
+                            .filter(|t| t.silent)
+                            .collect();
                         sorted_silent_transitions.sort_by(|a, b| a.id.cmp(&b.id));
-                        
+
                         // now, iterate over all silent transitions with a higher lexicographical order
                         // and add all firable combinations to the forbidden firings
                         for silent_transition in sorted_silent_transitions {
                             if (silent_transition.id <= transition.id) {
                                 continue;
                             }
-                            let firable_combinations = firing_combinations_per_transition.get(&silent_transition.id).unwrap();
+                            let firable_combinations = firing_combinations_per_transition
+                                .get(&silent_transition.id)
+                                .unwrap();
                             // todo consider filtering out forbidden firings
-                            base.entry(silent_transition.id).or_insert_with(|| vec![]).extend(firable_combinations.iter().cloned());
+                            base.entry(silent_transition.id)
+                                .or_insert_with(|| vec![])
+                                .extend(firable_combinations.iter().cloned());
                         }
-                        
+
                         Some(base)
                     } else {
                         None
@@ -1332,9 +1467,9 @@ impl ModelCaseChecker {
                 .get(transition_type)
                 .unwrap_or(&0) as i64
                 - *a.partial_case_stats
-                .query_event_counts
-                .get(transition_type)
-                .unwrap_or(&0) as i64;
+                    .query_event_counts
+                    .get(transition_type)
+                    .unwrap_or(&0) as i64;
 
             let transition_b = b.action_path.last().unwrap().transition_id().unwrap();
             let transition_type = &self.model.get_transition(&transition_b).unwrap().event_type;
@@ -1344,9 +1479,9 @@ impl ModelCaseChecker {
                 .get(transition_type)
                 .unwrap_or(&0) as i64
                 - *b.partial_case_stats
-                .query_event_counts
-                .get(transition_type)
-                .unwrap_or(&0) as i64;
+                    .query_event_counts
+                    .get(transition_type)
+                    .unwrap_or(&0) as i64;
 
             difference_a.partial_cmp(&difference_b).unwrap()
         });
@@ -1488,7 +1623,7 @@ mod tests {
         let case_file = fs::read_to_string(
             "./src/oc_case/test_data/variant_6eb2da5f3f3f7ea94ca51f1a72de8f47.jsonocel",
         )
-            .expect("Unable to read file");
+        .expect("Unable to read file");
 
         let mut query_case = json_to_case_graph(case_file.as_str());
 
@@ -1521,9 +1656,9 @@ mod tests {
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
             let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/fivetimeout",
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/difference",
             )
-                .unwrap();
+            .unwrap();
             let visualized_dir =
                 Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
             for (case_graph, path) in case_graph_iter {
@@ -1553,7 +1688,7 @@ mod tests {
                         Format::Png,
                         Some(2.0),
                     )
-                        .unwrap();
+                    .unwrap();
 
                     export_case_graph_image(
                         &result_node.partial_case,
