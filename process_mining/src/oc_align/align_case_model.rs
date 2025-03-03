@@ -353,15 +353,25 @@ impl ModelCaseChecker {
 
         let mut open_list: BinaryHeap<OrderedSearchNode> = BinaryHeap::with_capacity(60000000);
 
+        // open_list.push(
+        //     self.initialize_node_with_initial_places(
+        //         &query_case_stats,
+        //         initial_marking.clone(),
+        //         static_void_cost,
+        //     )
+        //     .into(),
+        // );
+        
         open_list.push(
-            self.initialize_node_with_initial_places(
-                &query_case_stats,
+            SearchNode::new(
                 initial_marking.clone(),
-                static_void_cost,
+                CaseGraph::new(),
+                0.0,
+                None,
+                vec![Arc::new(SearchNodeAction::VOID)],
             )
             .into(),
         );
-
         // let mut open_list: Vec<SearchNode> = vec![
         //     /*SearchNode::new(
         //         initial_marking,
@@ -1465,9 +1475,9 @@ impl ModelCaseChecker {
 
             difference_a.partial_cmp(&difference_b).unwrap()
         });
-        return transition_children;
-        //children.append(&mut transition_children);
-        //children
+        //return transition_children;
+        children.append(&mut transition_children);
+        children
     }
 }
 fn compare_bindings(a: &Arc<Binding>, b: &Arc<Binding>) -> Ordering {
