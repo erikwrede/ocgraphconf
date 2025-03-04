@@ -737,7 +737,12 @@ impl ModelCaseChecker {
                         .transitions
                         .values()
                         .find(|t| t.event_type == b_type);
-
+                    if(b_transition.is_none()) {
+                        println!("Couldnt find transition for event type: {}", b_type.to_string());
+                        added_void_cost += difference as f64;
+                        unreachable_events.insert(b_type);
+                        continue
+                    }
                     // get all input places to b and their object types
                     let b_input_places = b_transition
                         .unwrap()
@@ -1006,7 +1011,7 @@ impl ModelCaseChecker {
         // get last entry of node.action_path
 
         if (node.action_path.last().unwrap().is_pre_firing()) {
-            println!("Pre firing");
+            //println!("Pre firing");
             // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
             // this is because we can only add tokens to the initial places in lexicographical order
 
@@ -1648,7 +1653,7 @@ mod tests {
             let case_graph_iter = CaseGraphIterator::new(
                 "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/costcut",
             )
-            .unwrap();
+                .unwrap();
             let visualized_dir =
                 Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
             for (case_graph, path) in case_graph_iter {
@@ -1679,7 +1684,7 @@ mod tests {
                         Format::Png,
                         Some(2.0),
                     )
-                    .unwrap();
+                        .unwrap();
 
                     export_case_graph_image(
                         &result_node.partial_case,
@@ -1690,6 +1695,68 @@ mod tests {
                 } else {
                     println!("No solution found for case {:?}", path);
                 }
+            }
+        });
+        if result.is_err() {
+            println!("Error: {:?}", result.err());
+        }
+    }
+
+    #[test]
+    fn save_case_stats() {
+        let result = panic::catch_unwind(|| {
+            let json_data =
+                fs::read_to_string("./src/oc_align/test_data/bpi17/oc_petri_net.json").unwrap();
+            let ocpn = initialize_ocpn_from_json(&json_data);
+
+            // Wrap the petri net in Arc to match branch_and_bound signature
+            let petri_net_arc = Arc::new(ocpn);
+            let initial_marking = Marking::new(petri_net_arc.clone());
+
+            // deserialize a query case from a json file
+            // load file as string
+
+            let shortest_case_json =
+                fs::read_to_string("./src/oc_align/test_data/bpi17/shortest_case_graph.json")
+                    .expect("Unable to read file");
+            let shortest_case = deserialize_case_graph(shortest_case_json.as_str());
+
+            // Initialize ModelCaseChecker
+            let mut checker =
+                ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
+
+            let case_graph_iter = CaseGraphIterator::new(
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/test_data/varsbpi",
+            )
+                .unwrap();
+            // ensure directory stats exists or create it
+            let stats_dir = Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/stats");
+            if !stats_dir.exists() {
+                fs::create_dir(stats_dir).unwrap();
+            }
+            for (case_graph, path) in case_graph_iter {
+                let output_file_name = path.file_stem().unwrap().to_str().unwrap().to_owned();
+                let output_path = stats_dir.join(output_file_name);
+                
+                let case_stats = case_graph.get_case_stats();
+                
+                let object_count = case_graph.nodes.values().filter(|n| n.is_object()).count();
+                let event_count = case_graph.nodes.values().filter(|n| n.is_event()).count();
+                
+                let case_size = case_graph.nodes.len() + case_graph.edges.len();
+                
+                // save object_count, event_count, case_size, case_stats to a json file at output path
+                
+                let mut stats = HashMap::new();
+                stats.insert("object_count", object_count);
+                stats.insert("event_count", event_count);
+                stats.insert("case_size", case_size);
+                
+                let case_stats_json = serde_json::to_string(&stats).unwrap();
+                
+                fs::write(output_path.to_str().unwrap().to_owned() + "_stats.json", case_stats_json).unwrap();
+
+               
             }
         });
         if result.is_err() {

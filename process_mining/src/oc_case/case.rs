@@ -49,6 +49,20 @@ impl Node {
             Node::ObjectNode(object) => object.object_type.0,
         }
     }
+    
+    pub fn is_object(&self) -> bool {
+        match self {
+            Node::ObjectNode(_) => true,
+            _ => false,
+        }
+    }
+    
+    pub fn is_event(&self) -> bool {
+        match self {
+            Node::EventNode(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl PartialEq for Node {
