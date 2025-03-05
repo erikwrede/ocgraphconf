@@ -136,7 +136,7 @@ fn run_controller(
         Ok(n) => n.get(),
         Err(_) => 4, // Fallback to 4 if unable to determine
     };
-    let num_workers = 3;
+    let num_workers = 10;
     println!("Using {} concurrent workers.", num_workers);
 
     // Iterator over case_graph_files
@@ -238,7 +238,7 @@ fn run_controller(
         // Iterate over running_workers to check for completion
         running_workers.retain_mut(|(child, log_path, stats_path)| {
             // Check if the child has finished with a timeout
-            let timeout = Duration::from_secs(60 * 5); // 5 minutes
+            let timeout = Duration::from_secs(60 * 45); // 5 minutes
             let file_stem = log_path
                 .file_stem()
                 .and_then(OsStr::to_str)
