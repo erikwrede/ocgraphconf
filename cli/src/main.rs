@@ -39,15 +39,12 @@ enum Commands {
         /// JSON folder with all case graphs
         #[arg(short, long, value_name = "JSON_FOLDER")]
         json_folder: String,
-
         /// Path to the petri net JSON file
         #[arg(short, long, value_name = "PETRI_NET")]
         petri_net: String,
-
         /// Path to the smallest case graph JSON file
         #[arg(short = 's', long, value_name = "SMALLEST_CASE")]
         smallest_case: String,
-
         /// Output folder
         #[arg(short, long, value_name = "OUTPUT_DIR")]
         output_dir: String,
@@ -57,15 +54,12 @@ enum Commands {
         /// Path to the petri net JSON file
         #[arg(short, long, value_name = "PETRI_NET")]
         petri_net: String,
-
         /// Path to the smallest case graph JSON file
-        #[arg(short = 's', long, value_name = "SMALLEST_CASE")]
+        #[arg(short, long, value_name = "SMALLEST_CASE")]
         smallest_case: String,
-
         /// Path to the case graph JSON file
         #[arg(short, long, value_name = "CASE_GRAPH")]
         case_graph: String,
-
         /// Output folder
         #[arg(short, long, value_name = "OUTPUT_DIR")]
         output_dir: String,
@@ -78,9 +72,15 @@ struct CaseStats {
     alignment_cost: f64,
 }
 
+struct Worker {
+    child: Child,
+    log_path: PathBuf,
+    stats_path: PathBuf,
+    start_time: Instant,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
     match &cli.command {
         Commands::Controller {
             json_folder,
@@ -109,7 +109,6 @@ fn main() -> Result<()> {
             )?;
         }
     }
-
     Ok(())
 }
 
@@ -136,14 +135,17 @@ fn run_controller(
         Ok(n) => n.get(),
         Err(_) => 4, // Fallback to 4 if unable to determine
     };
-    let num_workers = 10;
+    let num_workers = 3; // Overriding to 10 as per original code
     println!("Using {} concurrent workers.", num_workers);
 
     // Iterator over case_graph_files
     let mut case_iter = case_graph_files.into_iter();
 
     // Vector to keep track of running workers
-    let mut running_workers: Vec<(Child, PathBuf, PathBuf)> = Vec::new();
+    let mut running_workers: Vec<Worker> = Vec::new();
+
+    // Define the timeout duration
+    let timeout = Duration::from_secs(60 * 3); // 45 minutes
 
     loop {
         // Spawn workers up to the limit
@@ -187,7 +189,6 @@ fn run_controller(
                 let log_file = File::create(&log_path)
                     .with_context(|| format!("Failed to create log file {:?}", log_path))?;
                 let log_file = Arc::new(Mutex::new(log_file));
-
                 let stdout = child
                     .stdout
                     .take()
@@ -196,7 +197,6 @@ fn run_controller(
                     .stderr
                     .take()
                     .expect("Failed to capture stderr of the child process");
-
                 let log_file_stdout = Arc::clone(&log_file);
                 let log_file_stderr = Arc::clone(&log_file);
 
@@ -225,7 +225,12 @@ fn run_controller(
                 });
 
                 // Add to running_workers
-                running_workers.push((child, log_path, stats_path));
+                running_workers.push(Worker {
+                    child,
+                    log_path,
+                    stats_path,
+                    start_time: Instant::now(),
+                });
             } else {
                 break;
             }
@@ -235,127 +240,155 @@ fn run_controller(
             break;
         }
 
-        // Iterate over running_workers to check for completion
-        running_workers.retain_mut(|(child, log_path, stats_path)| {
-            // Check if the child has finished with a timeout
-            let timeout = Duration::from_secs(60 * 45); // 5 minutes
-            let file_stem = log_path
-                .file_stem()
-                .and_then(OsStr::to_str)
-                .unwrap_or("unknown")
-                .to_owned();
-
-            match child.wait_timeout(timeout).unwrap() {
-                Some(status) => {
-                    if status.success() {
-                        // Read the stats from the temporary file
-                        let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
-                        if temp_stats_path.exists() {
-                            let stats_content = fs::read_to_string(&temp_stats_path).unwrap();
-                            let stats: CaseStats = serde_json::from_str(&stats_content).unwrap();
-                            fs::rename(temp_stats_path, &stats_path).unwrap();
-                            let duration = stats.duration_seconds;
-                            println!(
-                                "Completed case {} in {:.2} seconds with cost {}",
-                                file_stem,
-                                duration,
-                                stats_path.to_str().unwrap()
+        // Iterate over running_workers to check for completion or timeout
+        let mut i = 0;
+        while i < running_workers.len() {
+            let worker = &mut running_workers[i];
+            match worker.child.try_wait() {
+                Ok(Some(status)) => {
+                    handle_worker_exit(&worker, status, output_dir)?;
+                    running_workers.remove(i);
+                    // Do not increment i, as we've removed the current worker
+                }
+                Ok(None) => {
+                    // Check for timeout
+                    if worker.start_time.elapsed() > timeout {
+                        println!(
+                            "Worker for log {:?} timed out. Attempting to kill.",
+                            worker.log_path
+                        );
+                        // Kill the process
+                        if let Err(e) = worker.child.kill() {
+                            eprintln!(
+                                "Failed to kill worker for case {:?}: {:?}",
+                                worker.log_path, e
                             );
                         } else {
-                            eprintln!(
-                                "Worker did not produce stats file for case {}",
-                                file_stem
-                            );
-                            // Handle as needed
+                            println!("Killed worker for case {:?}", worker.log_path);
                         }
-                    } else {
-                        // Check if terminated by signal
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::process::ExitStatusExt;
-                            if let Some(signal) = status.signal() {
+
+                        // Wait for the process to exit to avoid zombie
+                        match worker.child.wait() {
+                            Ok(status) => {
+                                handle_worker_exit(&worker, status, output_dir)?;
+                            }
+                            Err(e) => {
                                 eprintln!(
-                                    "Worker was terminated by signal {} for case {}",
-                                    signal, file_stem
-                                );
-                            } else {
-                                eprintln!(
-                                    "Worker exited with status {:?} for case {}",
-                                    status, file_stem
+                                    "Error waiting for killed child process {:?}: {:?}",
+                                    worker.log_path, e
                                 );
                             }
                         }
-                        #[cfg(not(unix))]
-                        {
-                            eprintln!(
-                                "Worker exited with status {:?} for case {}",
-                                status, file_stem
-                            );
-                        }
 
-                        // Write to log
-                        if let Ok(mut log) = File::options().append(true).open(&log_path) {
-                            writeln!(log, "Worker exited with status {:?}", status).unwrap();
-                        }
-
-                        // Write stats with error
-                        let stats = CaseStats {
-                            duration_seconds: 0.0, // You might want to capture actual duration
-                            alignment_cost: f64::INFINITY, // Indicate failure
-                        };
-                        let stats_json = serde_json::to_string(&stats).unwrap();
-                        fs::write(&stats_path, stats_json).unwrap();
-                    }
-                    false // Remove from running_workers
-                }
-                None => {
-                    // Timeout expired, kill the process
-                    if let Err(e) = child.kill() {
-                        eprintln!(
-                            "Failed to kill worker for case {}: {:?}",
-                            file_stem, e
-                        );
+                        running_workers.remove(i);
+                        // Do not increment i, as we've removed the current worker
                     } else {
-                        eprintln!(
-                            "Worker timed out after {:.2} seconds for case {}",
-                            timeout.as_secs_f64(),
-                            file_stem
-                        );
+                        i += 1;
                     }
-
-                    // Write to log
-                    if let Ok(mut log) = File::options().append(true).open(&log_path) {
-                        writeln!(
-                            log,
-                            "Worker timed out after {:.2} seconds",
-                            timeout.as_secs_f64()
-                        )
-                            .unwrap();
-                    }
-
-                    // Write stats with timeout
-                    let stats = CaseStats {
-                        duration_seconds: timeout.as_secs_f64(),
-                        alignment_cost: f64::INFINITY, // Indicate failure
-                    };
-                    let stats_json = serde_json::to_string(&stats).unwrap();
-                    fs::write(&stats_path, stats_json).unwrap();
-
-                    // Wait for the child to exit to prevent zombie
-                    match child.wait() {
-                        Ok(_) => (),
-                        Err(e) => eprintln!("Error waiting for killed child process: {:?}", e),
-                    }
-
-                    false // Remove from running_workers
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Error attempting to wait on worker {:?}: {:?}",
+                        worker.log_path, e
+                    );
+                    running_workers.remove(i);
+                    // Do not increment i, as we've removed the current worker
                 }
             }
-        });
+        }
 
         // Sleep briefly to prevent tight looping
         thread::sleep(Duration::from_millis(100));
     }
+    Ok(())
+}
 
+/// Handles the exit of a worker process
+fn handle_worker_exit(worker: &Worker, status: std::process::ExitStatus, output_dir: &Path) -> Result<()> {
+    let file_stem = worker
+        .log_path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("unknown")
+        .to_owned();
+
+    if status.success() {
+        // Read the stats from the temporary file
+        let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
+        if temp_stats_path.exists() {
+            let stats_content = fs::read_to_string(&temp_stats_path).with_context(|| {
+                format!(
+                    "Failed to read temporary stats file {:?}",
+                    temp_stats_path
+                )
+            })?;
+            let stats: CaseStats = serde_json::from_str(&stats_content).with_context(|| {
+                format!(
+                    "Failed to deserialize stats from temporary file {:?}",
+                    temp_stats_path
+                )
+            })?;
+            fs::rename(&temp_stats_path, &worker.stats_path).with_context(|| {
+                format!(
+                    "Failed to rename temporary stats file {:?} to {:?}",
+                    temp_stats_path, worker.stats_path
+                )
+            })?;
+            let duration = stats.duration_seconds;
+            println!(
+                "Completed case {} in {:.2} seconds with cost {}",
+                file_stem,
+                duration,
+                stats.alignment_cost
+            );
+        } else {
+            eprintln!(
+                "Worker did not produce stats file for case {}",
+                file_stem
+            );
+            // Optionally, handle this scenario as needed
+        }
+    } else {
+        // Check if terminated by signal
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                eprintln!(
+                    "Worker was terminated by signal {} for case {}",
+                    signal, file_stem
+                );
+            } else {
+                eprintln!(
+                    "Worker exited with status {:?} for case {}",
+                    status, file_stem
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            eprintln!(
+                "Worker exited with status {:?} for case {}",
+                status, file_stem
+            );
+        }
+        // Write to log if possible
+        if let Ok(mut log) = File::options().append(true).open(&worker.log_path) {
+            writeln!(log, "Worker exited with status {:?}", status).unwrap();
+        }
+        // Write stats with error
+        let stats = CaseStats {
+            duration_seconds: 0.0,
+            alignment_cost: f64::INFINITY, // Indicate failure
+        };
+        let stats_json = serde_json::to_string(&stats)?;
+        fs::write(&worker.stats_path, stats_json).with_context(|| {
+            format!(
+                "Failed to write stats file {:?}",
+                worker.stats_path
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -409,11 +442,9 @@ fn run_worker(
     let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
     if let Some(result_node) = result {
         println!("Solution found for case {:?}", file_stem);
-
         // Align and calculate cost
         let alignment = CaseAlignment::align_mip(&case_graph, &result_node.partial_case);
         let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
-
         // Save aligned image
         let aligned_image_path = visualized_dir.join(format!(
             "{}_aligned_cost_{}.png",
@@ -426,7 +457,6 @@ fn run_worker(
             Format::Png,
             Some(2.0),
         )?;
-
         // Save target image
         let target_image_path = visualized_dir.join(format!("{}_target.png", file_stem));
         export_case_graph_image(
@@ -442,17 +472,13 @@ fn run_worker(
             duration_seconds: duration,
             alignment_cost: cost,
         };
-
         // Write stats to a temporary file (to be renamed by controller)
         let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
         let stats_json = serde_json::to_string(&stats)?;
         fs::write(&temp_stats_path, stats_json)?;
-
         println!(
             "Case {} processed in {:.2} seconds with cost {}",
-            file_stem,
-            duration,
-            cost
+            file_stem, duration, cost
         );
     } else {
         println!("No solution found for case {:?}", file_stem);
@@ -462,18 +488,15 @@ fn run_worker(
             duration_seconds: duration,
             alignment_cost: f64::INFINITY,
         };
-
         // Write stats to a temporary file
         let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
         let stats_json = serde_json::to_string(&stats)?;
         fs::write(&temp_stats_path, stats_json)?;
-
         println!(
             "Case {} processed in {:.2} seconds with no solution.",
             file_stem, duration
         );
     }
-
     Ok(())
 }
 
