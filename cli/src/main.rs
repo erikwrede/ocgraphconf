@@ -14,11 +14,12 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
+use std::os::unix::process::ExitStatusExt;
 
 /// CLI tool for rigorously testing the branch and bound function on multiple case graphs.
 #[derive(Parser)]
@@ -125,172 +126,239 @@ fn run_controller(
 
     // Iterate over case graph files
     let case_graph_files = find_case_graph_files(json_folder)?;
-
     println!(
         "Found {} case graph files to process.",
         case_graph_files.len()
     );
 
-    // Iterate sequentially
-    for case_graph in case_graph_files {
-        let file_stem = case_graph
-            .file_stem()
-            .and_then(OsStr::to_str)
-            .ok_or_else(|| anyhow!("Invalid file stem for {:?}", case_graph))?
-            .to_owned();
+    // Determine the number of concurrent workers based on available CPU cores
+    let num_workers = match thread::available_parallelism() {
+        Ok(n) => n.get(),
+        Err(_) => 4, // Fallback to 4 if unable to determine
+    };
+    let num_workers = 3;
+    println!("Using {} concurrent workers.", num_workers);
 
-        println!("Processing case graph: {}", case_graph.display());
+    // Iterator over case_graph_files
+    let mut case_iter = case_graph_files.into_iter();
 
-        // Define log and stats file paths
-        let log_path = output_dir.join(format!("{}.log", file_stem));
-        let stats_path = output_dir.join(format!("{}.json", file_stem));
+    // Vector to keep track of running workers
+    let mut running_workers: Vec<(Child, PathBuf, PathBuf)> = Vec::new();
 
-        // Prepare the command to run the worker
-        let current_exe = std::env::current_exe()?;
-        let mut cmd = Command::new(current_exe);
-        cmd.arg("worker")
-            .arg("--petri-net")
-            .arg(petri_net)
-            .arg("-s")
-            .arg(smallest_case)
-            .arg("--case-graph")
-            .arg(&case_graph)
-            .arg("--output-dir")
-            .arg(output_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+    loop {
+        // Spawn workers up to the limit
+        while running_workers.len() < num_workers {
+            if let Some(case_graph) = case_iter.next() {
+                let file_stem = case_graph
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .ok_or_else(|| anyhow!("Invalid file stem for {:?}", case_graph))?
+                    .to_owned();
+                println!("Processing case graph: {}", case_graph.display());
 
-        // Spawn the worker process
-        let mut child = cmd.spawn().with_context(|| {
-            format!(
-                "Failed to spawn worker for case graph {}",
-                case_graph.display()
-            )
-        })?;
-        let start_time = Instant::now();
+                // Define log and stats file paths
+                let log_path = output_dir.join(format!("{}.log", file_stem));
+                let stats_path = output_dir.join(format!("{}.json", file_stem));
 
-        // Set timeout of 2.5 hours
-        //let timeout = Duration::from_secs(2 * 60 * 60 + 30 * 60); // 2.5 hours
+                // Prepare the command to run the worker
+                let current_exe = std::env::current_exe()?;
+                let mut cmd = Command::new(current_exe);
+                cmd.arg("worker")
+                    .arg("--petri-net")
+                    .arg(petri_net)
+                    .arg("-s")
+                    .arg(smallest_case)
+                    .arg("--case-graph")
+                    .arg(&case_graph)
+                    .arg("--output-dir")
+                    .arg(output_dir)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
 
-        // set timeout of 7 minutes
-        let timeout = Duration::from_secs(60*5); // 5 minutes
-        
-        // Open the log file and wrap it in an Arc<Mutex<>> for thread-safe access
-        let log_file = File::create(&log_path)?;
-        let log_file = Arc::new(Mutex::new(log_file));
-
-        // Clone references for the threads
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("Failed to capture stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("Failed to capture stderr"))?;
-        let log_file_stdout = Arc::clone(&log_file);
-        let log_file_stderr = Arc::clone(&log_file);
-
-        // Spawn a thread to handle stdout
-        let stdout_thread = thread::spawn(move || -> Result<()> {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                let line = line?;
-                println!("{}", line);
-                let mut log = log_file_stdout.lock().unwrap();
-                writeln!(log, "{}", line)?;
-            }
-            Ok(())
-        });
-
-        // Spawn a thread to handle stderr
-        let stderr_thread = thread::spawn(move || -> Result<()> {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                let line = line?;
-                eprintln!("{}", line);
-                let mut log = log_file_stderr.lock().unwrap();
-                writeln!(log, "stderr: {}", line)?;
-            }
-            Ok(())
-        });
-
-        // Use wait_timeout to wait with timeout
-        match child.wait_timeout(timeout)? {
-            Some(status) => {
-                // Wait for the stdout and stderr threads to finish
-                stdout_thread.join().expect("Failed to join stdout thread")?;
-                stderr_thread.join().expect("Failed to join stderr thread")?;
-
-                if status.success() {
-                    // Read the stats from the temporary file
-                    let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
-                    if temp_stats_path.exists() {
-                        let stats_content = fs::read_to_string(&temp_stats_path)?;
-                        let stats: CaseStats = serde_json::from_str(&stats_content)?;
-                        fs::rename(temp_stats_path, &stats_path)?;
-                    } else {
-                        return Err(anyhow!(
-                            "Worker did not produce stats file for case {}",
-                            file_stem
-                        ));
-                    }
-
-                    let duration = start_time.elapsed();
-                    println!(
-                        "Completed case {} in {:.2} seconds with cost {}",
-                        file_stem,
-                        duration.as_secs_f64(),
-                        stats_path.to_str().unwrap()
-                    );
-                } else {
-                    eprintln!(
-                        "Worker exited with status {:?} for case {}",
-                        status,
+                // Spawn the worker process
+                let mut child = cmd.spawn().with_context(|| {
+                    format!(
+                        "Failed to spawn worker for case graph {}",
                         case_graph.display()
-                    );
-                    // Write to log
-                    let mut log = log_file.lock().unwrap();
-                    writeln!(log, "Worker exited with status {:?}", status)?;
+                    )
+                })?;
 
-                    // Write stats with error
-                    let stats = CaseStats {
-                        duration_seconds: start_time.elapsed().as_secs_f64(),
-                        alignment_cost: f64::INFINITY, // Indicate failure
-                    };
-                    let stats_json = serde_json::to_string(&stats)?;
-                    fs::write(&stats_path, stats_json)?;
-                }
-            }
-            None => {
-                // Timeout expired, kill the process
-                child.kill()?;
-                eprintln!(
-                    "Worker timed out after {:.2} seconds for case {}",
-                    timeout.as_secs_f64(),
-                    case_graph.display()
-                );
-                // Write to log
-                let mut log = log_file.lock().unwrap();
-                writeln!(
-                    log,
-                    "Worker timed out after {:.2} seconds",
-                    timeout.as_secs_f64()
-                )?;
+                // Set up logging for the worker
+                let log_file = File::create(&log_path)
+                    .with_context(|| format!("Failed to create log file {:?}", log_path))?;
+                let log_file = Arc::new(Mutex::new(log_file));
 
-                // Write stats with timeout
-                let stats = CaseStats {
-                    duration_seconds: timeout.as_secs_f64(),
-                    alignment_cost: f64::INFINITY, // Indicate failure
-                };
-                let stats_json = serde_json::to_string(&stats)?;
-                fs::write(&stats_path, stats_json)?;
+                let stdout = child
+                    .stdout
+                    .take()
+                    .expect("Failed to capture stdout of the child process");
+                let stderr = child
+                    .stderr
+                    .take()
+                    .expect("Failed to capture stderr of the child process");
+
+                let log_file_stdout = Arc::clone(&log_file);
+                let log_file_stderr = Arc::clone(&log_file);
+
+                // Spawn a thread to handle stdout
+                thread::spawn(move || -> Result<()> {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines() {
+                        let line = line?;
+                        println!("{}", line);
+                        let mut log = log_file_stdout.lock().unwrap();
+                        writeln!(log, "{}", line)?;
+                    }
+                    Ok(())
+                });
+
+                // Spawn a thread to handle stderr
+                thread::spawn(move || -> Result<()> {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines() {
+                        let line = line?;
+                        eprintln!("{}", line);
+                        let mut log = log_file_stderr.lock().unwrap();
+                        writeln!(log, "stderr: {}", line)?;
+                    }
+                    Ok(())
+                });
+
+                // Add to running_workers
+                running_workers.push((child, log_path, stats_path));
+            } else {
+                break;
             }
         }
+
+        if running_workers.is_empty() {
+            break;
+        }
+
+        // Iterate over running_workers to check for completion
+        running_workers.retain_mut(|(child, log_path, stats_path)| {
+            // Check if the child has finished with a timeout
+            let timeout = Duration::from_secs(60 * 5); // 5 minutes
+            let file_stem = log_path
+                .file_stem()
+                .and_then(OsStr::to_str)
+                .unwrap_or("unknown")
+                .to_owned();
+
+            match child.wait_timeout(timeout).unwrap() {
+                Some(status) => {
+                    if status.success() {
+                        // Read the stats from the temporary file
+                        let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
+                        if temp_stats_path.exists() {
+                            let stats_content = fs::read_to_string(&temp_stats_path).unwrap();
+                            let stats: CaseStats = serde_json::from_str(&stats_content).unwrap();
+                            fs::rename(temp_stats_path, &stats_path).unwrap();
+                            let duration = stats.duration_seconds;
+                            println!(
+                                "Completed case {} in {:.2} seconds with cost {}",
+                                file_stem,
+                                duration,
+                                stats_path.to_str().unwrap()
+                            );
+                        } else {
+                            eprintln!(
+                                "Worker did not produce stats file for case {}",
+                                file_stem
+                            );
+                            // Handle as needed
+                        }
+                    } else {
+                        // Check if terminated by signal
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::ExitStatusExt;
+                            if let Some(signal) = status.signal() {
+                                eprintln!(
+                                    "Worker was terminated by signal {} for case {}",
+                                    signal, file_stem
+                                );
+                            } else {
+                                eprintln!(
+                                    "Worker exited with status {:?} for case {}",
+                                    status, file_stem
+                                );
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            eprintln!(
+                                "Worker exited with status {:?} for case {}",
+                                status, file_stem
+                            );
+                        }
+
+                        // Write to log
+                        if let Ok(mut log) = File::options().append(true).open(&log_path) {
+                            writeln!(log, "Worker exited with status {:?}", status).unwrap();
+                        }
+
+                        // Write stats with error
+                        let stats = CaseStats {
+                            duration_seconds: 0.0, // You might want to capture actual duration
+                            alignment_cost: f64::INFINITY, // Indicate failure
+                        };
+                        let stats_json = serde_json::to_string(&stats).unwrap();
+                        fs::write(&stats_path, stats_json).unwrap();
+                    }
+                    false // Remove from running_workers
+                }
+                None => {
+                    // Timeout expired, kill the process
+                    if let Err(e) = child.kill() {
+                        eprintln!(
+                            "Failed to kill worker for case {}: {:?}",
+                            file_stem, e
+                        );
+                    } else {
+                        eprintln!(
+                            "Worker timed out after {:.2} seconds for case {}",
+                            timeout.as_secs_f64(),
+                            file_stem
+                        );
+                    }
+
+                    // Write to log
+                    if let Ok(mut log) = File::options().append(true).open(&log_path) {
+                        writeln!(
+                            log,
+                            "Worker timed out after {:.2} seconds",
+                            timeout.as_secs_f64()
+                        )
+                            .unwrap();
+                    }
+
+                    // Write stats with timeout
+                    let stats = CaseStats {
+                        duration_seconds: timeout.as_secs_f64(),
+                        alignment_cost: f64::INFINITY, // Indicate failure
+                    };
+                    let stats_json = serde_json::to_string(&stats).unwrap();
+                    fs::write(&stats_path, stats_json).unwrap();
+
+                    // Wait for the child to exit to prevent zombie
+                    match child.wait() {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("Error waiting for killed child process: {:?}", e),
+                    }
+
+                    false // Remove from running_workers
+                }
+            }
+        });
+
+        // Sleep briefly to prevent tight looping
+        thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())
 }
+
 /// Worker function to process a single case graph
 fn run_worker(
     petri_net: &Path,
@@ -301,36 +369,34 @@ fn run_worker(
     // Start timing
     let start_time = Instant::now();
     println!("Hello from worker!");
+
     // Initialize ModelCaseChecker
     // Assuming these functions and structs are defined elsewhere in your project
-    let json_data =
-        fs::read_to_string(petri_net).with_context(|| format!("Reading {:?}", petri_net))?;
+    let json_data = fs::read_to_string(petri_net)
+        .with_context(|| format!("Reading {:?}", petri_net))?;
     let ocpn = initialize_ocpn_from_json(&json_data);
-
     let petri_net_arc = std::sync::Arc::new(ocpn);
     let initial_marking = Marking::new(petri_net_arc.clone());
-
     let shortest_case_json = fs::read_to_string(smallest_case)
         .with_context(|| format!("Reading {:?}", smallest_case))?;
     let shortest_case = deserialize_case_graph(&shortest_case_json);
-
     let mut checker =
         ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
     // Read the specific case graph
     let case_file = fs::read_to_string(case_graph)
         .with_context(|| format!("Reading case graph {:?}", case_graph))?;
+
     // Save image of the query case
     // file stem is the name of the input file without extension
     let file_stem = case_graph
         .file_stem()
         .and_then(OsStr::to_str)
-        .ok_or_else(|| anyhow!("Invalid file stem for {:?}", case_graph))?;
+        .ok_or_else(|| anyhow!("Invalid file stem for {:?}", case_graph))?
+        .to_owned();
     let case_graph = json_to_case_graph(&case_file);
-
     let visualized_dir = output_dir.join("visualized");
     fs::create_dir_all(&visualized_dir)?;
-
     let query_image_path = visualized_dir.join(format!("{}_query.png", file_stem));
     export_case_graph_image(
         &case_graph,
@@ -341,7 +407,6 @@ fn run_worker(
 
     // Run branch_and_bound
     let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
-
     if let Some(result_node) = result {
         println!("Solution found for case {:?}", file_stem);
 
@@ -350,8 +415,10 @@ fn run_worker(
         let cost = alignment.total_cost().unwrap_or(f64::INFINITY);
 
         // Save aligned image
-        let aligned_image_path =
-            visualized_dir.join(format!("{}_aligned_cost_{}.png", file_stem, cost));
+        let aligned_image_path = visualized_dir.join(format!(
+            "{}_aligned_cost_{}.png",
+            file_stem, cost
+        ));
         export_c2_with_alignment_image(
             &result_node.partial_case,
             &alignment,
@@ -383,11 +450,12 @@ fn run_worker(
 
         println!(
             "Case {} processed in {:.2} seconds with cost {}",
-            file_stem, duration, cost
+            file_stem,
+            duration,
+            cost
         );
     } else {
         println!("No solution found for case {:?}", file_stem);
-
         // Prepare stats with infinity cost
         let duration = start_time.elapsed().as_secs_f64();
         let stats = CaseStats {
@@ -417,10 +485,10 @@ fn find_case_graph_files(dir: &Path) -> Result<Vec<PathBuf>> {
         let path = entry.path();
         if path.is_file()
             && path
-                .extension()
-                .and_then(OsStr::to_str)
-                .map(|ext| ext.eq_ignore_ascii_case("jsonocel"))
-                .unwrap_or(false)
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(|ext| ext.eq_ignore_ascii_case("jsonocel"))
+            .unwrap_or(false)
         {
             files.push(path);
         }
