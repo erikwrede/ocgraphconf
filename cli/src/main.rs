@@ -135,7 +135,7 @@ fn run_controller(
         Ok(n) => n.get(),
         Err(_) => 4, // Fallback to 4 if unable to determine
     };
-    let num_workers = 3; // Overriding to 10 as per original code
+    let num_workers = 10; // Overriding to 10 as per original code
     println!("Using {} concurrent workers.", num_workers);
 
     // Iterator over case_graph_files
@@ -145,7 +145,7 @@ fn run_controller(
     let mut running_workers: Vec<Worker> = Vec::new();
 
     // Define the timeout duration
-    let timeout = Duration::from_secs(60 * 3); // 45 minutes
+    let timeout = Duration::from_secs(60 * 45); // 45 minutes
 
     loop {
         // Spawn workers up to the limit
