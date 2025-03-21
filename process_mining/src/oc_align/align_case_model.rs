@@ -1,4 +1,6 @@
-use crate::oc_align::align_case::CaseAlignment;
+use crate::oc_align::align_case::EdgeMapping::{RealEdge, VoidEdge};
+use crate::oc_align::align_case::NodeMapping::{RealNode, VoidNode};
+use crate::oc_align::align_case::{CaseAlignment, EdgeMapping, Mappable, NodeMapping};
 use crate::oc_align::util::reachability_cache::ReachabilityCache;
 use crate::oc_align::util::shortest_path_cache::ShortestPathCache;
 use crate::oc_align::visualization::case_visual::export_c2_with_alignment_image;
@@ -24,6 +26,10 @@ pub struct SearchNode {
     action_path: Vec<Arc<SearchNodeAction>>,
     partial_case_stats: CaseStats,
     forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
+    open_query_nodes: Vec<usize>,
+    reverse_node_mapping: HashMap<usize, NodeMapping>, // cp_node_id -> query case mapping
+    reverse_edge_mapping: HashMap<usize, EdgeMapping>, // cp_edge_id -> query case mapping
+
     depth: usize,
 }
 
@@ -72,6 +78,9 @@ impl SearchNode {
         partial_case: CaseGraph,
         min_cost: f64,
         most_recent_event_id: Option<usize>,
+        open_query_nodes: Vec<usize>,
+        reverse_node_mapping: HashMap<usize, NodeMapping>,
+        reverse_edge_mapping: HashMap<usize, EdgeMapping>,
         action: Vec<Arc<SearchNodeAction>>,
     ) -> Self {
         SearchNode {
@@ -83,6 +92,9 @@ impl SearchNode {
             action_path: action,
             depth: 0,
             forbidden_firings: None,
+            open_query_nodes,
+            reverse_node_mapping,
+            reverse_edge_mapping,
         }
     }
 
@@ -95,6 +107,9 @@ impl SearchNode {
         action: Vec<Arc<SearchNodeAction>>,
         partial_case_stats: CaseStats,
         depth: usize,
+        open_query_nodes: Vec<usize>,
+        reverse_node_mapping: HashMap<usize, NodeMapping>,
+        reverse_edge_mapping: HashMap<usize, EdgeMapping>,
         forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
     ) -> Self {
         SearchNode {
@@ -106,6 +121,9 @@ impl SearchNode {
             action_path: action,
             depth,
             forbidden_firings,
+            open_query_nodes,
+            reverse_node_mapping,
+            reverse_edge_mapping,
         }
     }
 
@@ -244,60 +262,55 @@ impl ModelCaseChecker {
 
     fn initialize_node_with_initial_places(
         &mut self,
-        query_case_stats: &CaseStats,
+        query_case: &CaseGraph,
         mut new_marking: Marking,
         static_cost: f64,
     ) -> SearchNode {
         let mut new_partial_case = CaseGraph::new();
+        let mut reverse_node_mapping: HashMap<usize, NodeMapping> = HashMap::new();
 
         // Get the initial places from the model
-        let initial_places: HashSet<String> = self
+        let initial_places: HashSet<ObjectType> = self
             .model
             .get_initial_places()
             .iter()
-            .map(|p| p.object_type.clone())
+            .map(|p| p.oc_object_type.clone())
             .collect();
 
         // Initialize marking and case from query_case_stats, only for initial places
-        for (object_type, count) in &query_case_stats.query_object_counts {
-            let typename = object_type.to_string();
-            if initial_places.contains(&typename) {
-                for _ in 0..*count {
+        &query_case
+            .nodes
+            .values()
+            .filter(|node| node.is_object())
+            .for_each(|node| {
+                let object_type: ObjectType = node.oc_type_id().into();
+                if initial_places.contains(&object_type) {
                     // Find the initial place with the same object type
+                    // TODO support multiple initial places
                     let place = self
                         .model
                         .get_initial_places()
                         .iter()
-                        .find(|p| &p.object_type == &typename)
+                        .find(|p| &p.oc_object_type == &object_type)
                         .expect("Expected matching initial place for given object type")
                         .clone();
 
                     // Add token to this initial place in the marking
                     let token_ids = new_marking.add_initial_token_count(&place.id, 1);
-
                     // Create a new object node and add it to the case graph
                     let object_id = new_partial_case.get_new_id();
                     let new_object = Node::ObjectNode(Object {
                         id: object_id.clone(),
                         object_type: object_type.clone(),
                     });
+                    reverse_node_mapping
+                        .insert(new_object.id(), RealNode(new_object.id(), node.id()));
                     new_partial_case.add_node(new_object);
 
                     // Map the token to object id
                     self.token_graph_id_mapping.insert(token_ids[0], object_id);
                 }
-            }
-        }
-
-        let min_cost = self.calculate_min_cost(
-            &query_case_stats,
-            &new_partial_case.get_case_stats(),
-            static_cost,
-            &new_marking,
-        );
-        println!("Starting Min Cost: {}", min_cost);
-        // Calculate the minimum cost using the initialized stats
-        let min_cost = 0;
+            });
 
         // Create and return the initialized SearchNode
         SearchNode::new(
@@ -305,6 +318,14 @@ impl ModelCaseChecker {
             new_partial_case,
             0 as f64,
             None,
+            query_case
+                .nodes
+                .values()
+                .filter(|node| node.is_event())
+                .map(|node| node.id())
+                .collect(),
+            reverse_node_mapping,
+            HashMap::new(),
             vec![Arc::new(SearchNodeAction::VOID)],
         )
     }
@@ -341,27 +362,30 @@ impl ModelCaseChecker {
             let alignment = CaseAlignment::align_mip(query_case, shortest_case);
             global_upper_bound = alignment.total_cost().unwrap_or(f64::INFINITY);
             println!("Initial upper bound: {}", global_upper_bound);
-
+            // FIXME hier wieder richtig initialisieren
             best_node = Some(SearchNode::new(
                 initial_marking.clone(),
                 shortest_case.clone(),
                 global_upper_bound,
                 None,
+                vec![],
+                HashMap::new(),
+                HashMap::new(),
                 vec![Arc::new(SearchNodeAction::VOID)],
             ));
         }
 
         let mut open_list: BinaryHeap<OrderedSearchNode> = BinaryHeap::with_capacity(60000000);
 
-        
         open_list.push(
             self.initialize_node_with_initial_places(
-                &query_case_stats,
+                &query_case,
                 initial_marking.clone(),
                 static_void_cost,
-            ).into()
+            )
+            .into(),
         );
-        
+
         // open_list.push(
         //     SearchNode::new(
         //         initial_marking.clone(),
@@ -401,7 +425,7 @@ impl ModelCaseChecker {
 
             counter += 1;
             // every 5 seconds print an update
-            if most_recent_timestamp.elapsed().as_secs() >= 30 {
+            if most_recent_timestamp.elapsed().as_secs() >= 30 && current_node.depth >= 22 {
                 most_recent_timestamp = std::time::Instant::now();
                 println!("===================== Progress update =====================");
                 println!("Nodes explored: {}", counter);
@@ -481,11 +505,11 @@ impl ModelCaseChecker {
                 //     Some(0.75),
                 // )
                 // .unwrap();
-
+                // 
                 // export_c2_with_alignment_image(
                 //     &intermediate_graph,
                 //     &intermediate_alignment,
-                //     format!("./intermediates/intermediate_{}_alignment.png", counter).as_str(),
+                //     format!("./intermediates_4/intermediate_{}_alignment.png", counter).as_str(),
                 //     Format::Png,
                 //     Some(2.0),
                 // )
@@ -522,7 +546,8 @@ impl ModelCaseChecker {
                 mip_counter += 1;
                 if (!any_solution_found) {
                     any_solution_found = true;
-                    println!("First final marking reached")
+                    println!("First final marking reached");
+                    print!("depth: {}", current_node.depth);
                 }
                 // temporarily throw an error here so everything is stopped
                 // now output a lot of info such as a string repr of the current case we found and the cost etc
@@ -601,8 +626,12 @@ impl ModelCaseChecker {
             }
 
             if (generate_children) {
-                let children =
-                    self.generate_children(&current_node, &query_case_stats, static_void_cost);
+                let children = self.generate_children(
+                    &current_node,
+                    &query_case_stats,
+                    &query_case,
+                    static_void_cost,
+                );
                 for mut child in children {
                     if child.min_cost < global_upper_bound {
                         //child.action.log(self.model.clone());
@@ -728,7 +757,7 @@ impl ModelCaseChecker {
                     .edge_type_counts
                     .get(&(*edge_type, *a, *b))
                     .unwrap_or(&0);
-                let difference : isize = query_count as isize - *partial_count as isize;
+                let difference: isize = query_count as isize - *partial_count as isize;
                 if (difference > 0) {
                     let b_type: EventType = b.clone().into();
 
@@ -737,11 +766,14 @@ impl ModelCaseChecker {
                         .transitions
                         .values()
                         .find(|t| t.event_type == b_type);
-                    if(b_transition.is_none()) {
-                        println!("Couldnt find transition for event type: {}", b_type.to_string());
+                    if (b_transition.is_none()) {
+                        println!(
+                            "Couldnt find transition for event type: {}",
+                            b_type.to_string()
+                        );
                         added_void_cost += difference as f64;
                         unreachable_events.insert(b_type);
-                        continue
+                        continue;
                     }
                     // get all input places to b and their object types
                     let b_input_places = b_transition
@@ -1002,129 +1034,130 @@ impl ModelCaseChecker {
         &mut self,
         node: &SearchNode,
         query_case_stats: &CaseStats,
+        query_case: &'a CaseGraph,
         static_cost: f64,
     ) -> Vec<SearchNode> {
-        let mut children = Vec::new();
+        //let mut children = Vec::new();
 
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
         //println!("GEtting initial places");
         // get last entry of node.action_path
+        /* FIXME
+                if (node.action_path.last().unwrap().is_pre_firing()) {
+                    //println!("Pre firing");
+                    // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
+                    // this is because we can only add tokens to the initial places in lexicographical order
 
-        if (node.action_path.last().unwrap().is_pre_firing()) {
-            //println!("Pre firing");
-            // a search node that is pre firing is dead, when it misses tokens in an initial place of higher lexicographical order in order to fire anything
-            // this is because we can only add tokens to the initial places in lexicographical order
+                    // check this by checking [INSERT HERE]
 
-            // check this by checking [INSERT HERE]
+                    // Order the object types in the net lexicographically and remove duplicates
+                    let mut initial_place_names: Vec<String> = self
+                        .model
+                        .get_initial_places()
+                        .iter()
+                        .map(|p| p.object_type.clone())
+                        .collect::<HashSet<_>>() // Remove duplicates
+                        .into_iter()
+                        .collect();
 
-            // Order the object types in the net lexicographically and remove duplicates
-            let mut initial_place_names: Vec<String> = self
-                .model
-                .get_initial_places()
-                .iter()
-                .map(|p| p.object_type.clone())
-                .collect::<HashSet<_>>() // Remove duplicates
-                .into_iter()
-                .collect();
+                    initial_place_names.sort(); // Sort lexicographically
+                                                //initial_place_names.reverse();
 
-            initial_place_names.sort(); // Sort lexicographically
-                                        //initial_place_names.reverse();
+                    let mut initial_places = self.model.get_initial_places().clone();
+                    //initial_places = next_permutation(&initial_places);
 
-            let mut initial_places = self.model.get_initial_places().clone();
-            //initial_places = next_permutation(&initial_places);
+                    let counts_per_type = node.marking.get_initial_counts_per_type();
 
-            let counts_per_type = node.marking.get_initial_counts_per_type();
+                    // sort the place by amount of tokens in the marking
+                    initial_places.sort_by(|a, b| {
+                        let a_count = counts_per_type.get(&a.object_type).unwrap_or(&0);
+                        let b_count = counts_per_type.get(&b.object_type).unwrap_or(&0);
 
-            // sort the place by amount of tokens in the marking
-            initial_places.sort_by(|a, b| {
-                let a_count = counts_per_type.get(&a.object_type).unwrap_or(&0);
-                let b_count = counts_per_type.get(&b.object_type).unwrap_or(&0);
+                        let a_query_count = query_case_stats
+                            .query_object_counts
+                            .get(&a.oc_object_type)
+                            .unwrap_or(&0);
+                        let b_query_count = query_case_stats
+                            .query_object_counts
+                            .get(&b.oc_object_type)
+                            .unwrap_or(&0);
 
-                let a_query_count = query_case_stats
-                    .query_object_counts
-                    .get(&a.oc_object_type)
-                    .unwrap_or(&0);
-                let b_query_count = query_case_stats
-                    .query_object_counts
-                    .get(&b.oc_object_type)
-                    .unwrap_or(&0);
+                        let a_diff = (*a_query_count as i64 - *a_count as i64);
+                        let b_diff = (*b_query_count as i64 - *b_count as i64);
 
-                let a_diff = (*a_query_count as i64 - *a_count as i64);
-                let b_diff = (*b_query_count as i64 - *b_count as i64);
+                        if a_diff > 0 {
+                            return b_diff.cmp(&a_diff);
+                        }
 
-                if a_diff > 0 {
-                    return b_diff.cmp(&a_diff);
-                }
-
-                if a_count == b_count {
-                    if a_query_count == b_query_count {
-                        return b.object_type.cmp(&a.object_type);
-                    }
-                    return b_query_count.cmp(&a_query_count);
-                }
-                b_count.cmp(&a_count)
-            });
-
-            for place in initial_places {
-                // Find the index of the current object's type in the sorted list
-                let type_index = initial_place_names
-                    .iter()
-                    .position(|t| t == &place.object_type)
-                    .expect("Object type should exist in initial_places");
-
-                // Check if any higher lexicographical types have been used (i.e., have a count > 0)
-                let higher_types_used = initial_place_names[type_index + 1..]
-                    .iter()
-                    .any(|t| counts_per_type.get(t).map_or(false, |count| *count > 0));
-
-                // Only allow incrementing if no higher types have been used
-                if !higher_types_used {
-                    // Proceed to add a token to this place
-                    let mut new_marking = node.marking.clone();
-                    let token_ids = new_marking.add_initial_token_count(&place.id, 1);
-
-                    let mut new_partial_case = node.partial_case.clone();
-                    let object_id = new_partial_case.get_new_id();
-
-                    let new_object = Node::ObjectNode(Object {
-                        id: object_id.clone(),
-                        object_type: place.object_type.clone().into(),
+                        if a_count == b_count {
+                            if a_query_count == b_query_count {
+                                return b.object_type.cmp(&a.object_type);
+                            }
+                            return b_query_count.cmp(&a_query_count);
+                        }
+                        b_count.cmp(&a_count)
                     });
-                    new_partial_case.add_node(new_object);
 
-                    let mut new_partial_case_stats = node.partial_case_stats.clone();
-                    new_partial_case_stats
-                        .query_object_counts
-                        .entry(place.oc_object_type)
-                        .and_modify(|e| *e += 1)
-                        .or_insert(1);
+                    for place in initial_places {
+                        // Find the index of the current object's type in the sorted list
+                        let type_index = initial_place_names
+                            .iter()
+                            .position(|t| t == &place.object_type)
+                            .expect("Object type should exist in initial_places");
 
-                    let min_cost = self.calculate_min_cost(
-                        &query_case_stats,
-                        &new_partial_case_stats,
-                        static_cost,
-                        &new_marking,
-                    );
-                    self.token_graph_id_mapping.insert(token_ids[0], object_id);
-                    let mut new_action_path = node.action_path.clone();
-                    let new_action = Arc::new(SearchNodeAction::add_token(place.id.clone()));
-                    new_action_path.push(new_action);
-                    children.push(SearchNode::new_with_stats(
-                        new_marking,
-                        new_partial_case,
-                        min_cost,
-                        None,
-                        new_action_path,
-                        new_partial_case_stats,
-                        node.depth + 1,
-                        None,
-                    ));
+                        // Check if any higher lexicographical types have been used (i.e., have a count > 0)
+                        let higher_types_used = initial_place_names[type_index + 1..]
+                            .iter()
+                            .any(|t| counts_per_type.get(t).map_or(false, |count| *count > 0));
+
+                        // Only allow incrementing if no higher types have been used
+                        if !higher_types_used {
+                            // Proceed to add a token to this place
+                            let mut new_marking = node.marking.clone();
+                            let token_ids = new_marking.add_initial_token_count(&place.id, 1);
+
+                            let mut new_partial_case = node.partial_case.clone();
+                            let object_id = new_partial_case.get_new_id();
+
+                            let new_object = Node::ObjectNode(Object {
+                                id: object_id.clone(),
+                                object_type: place.object_type.clone().into(),
+                            });
+                            new_partial_case.add_node(new_object);
+
+                            let mut new_partial_case_stats = node.partial_case_stats.clone();
+                            new_partial_case_stats
+                                .query_object_counts
+                                .entry(place.oc_object_type)
+                                .and_modify(|e| *e += 1)
+                                .or_insert(1);
+
+                            let min_cost = self.calculate_min_cost(
+                                &query_case_stats,
+                                &new_partial_case_stats,
+                                static_cost,
+                                &new_marking,
+                            );
+                            self.token_graph_id_mapping.insert(token_ids[0], object_id);
+                            let mut new_action_path = node.action_path.clone();
+                            let new_action = Arc::new(SearchNodeAction::add_token(place.id.clone()));
+                            new_action_path.push(new_action);
+                            children.push(SearchNode::new_with_stats(
+                                new_marking,
+                                new_partial_case,
+                                min_cost,
+                                None,
+                                new_action_path,
+                                new_partial_case_stats,
+                                node.depth + 1,
+                                None,
+                            ));
+                        }
+                        // If higher_types_used is true, do not add tokens to this and lower types
+                        // Continue to the next place
+                    }
                 }
-                // If higher_types_used is true, do not add tokens to this and lower types
-                // Continue to the next place
-            }
-        }
-
+        */
         //println!("Getting transitions");
 
         //
@@ -1175,8 +1208,8 @@ impl ModelCaseChecker {
             }
 
             // Filter combinations based on symmetry breaking
-            let filtered_combinations =
-                self.filter_firing_combinations(&firing_combinations, transition, node);
+            let filtered_combinations = firing_combinations;
+            //self.filter_firing_combinations(&firing_combinations, transition, node);
 
             if (filtered_combinations.is_empty()) {
                 panic!("No filtered combinations?!");
@@ -1231,21 +1264,29 @@ impl ModelCaseChecker {
                     new_marking.fire_transition(transition, combination);
                     let mut new_partial_case_stats = node.partial_case_stats.clone();
 
+                    let mut new_action_path = node.action_path.clone();
+                    let new_action = Arc::new(SearchNodeAction::fire_transition(
+                        transition.id,
+                        combination.clone().clone(),
+                    ));
+                    new_action_path.push(new_action);
+
                     if (!transition.silent) {
+                        let event_type: EventType = transition.event_type.clone().into();
                         let event_id = new_partial_case.get_new_id();
                         let new_event = Node::EventNode(Event {
                             id: event_id,
-                            event_type: transition.name.clone().into(),
+                            event_type: event_type.clone(),
                         });
                         new_partial_case.add_node(new_event);
-
+                        let mut collected_edges: Vec<Edge> = Vec::new();
                         combination
                             .object_binding_info
                             .values()
                             .for_each(|binding_info| {
                                 binding_info.tokens.iter().for_each(|token| {
                                     let e20_edge_id = new_partial_case.get_new_id();
-                                    new_partial_case.add_edge(Edge::new(
+                                    collected_edges.push(Edge::new(
                                         e20_edge_id,
                                         event_id,
                                         self.token_graph_id_mapping.get(&token.id).unwrap().clone(),
@@ -1270,7 +1311,7 @@ impl ModelCaseChecker {
 
                         let df_edge_id = new_partial_case.get_new_id();
                         if let Some(prev_event_id) = node.most_recent_event_id {
-                            new_partial_case.add_edge(Edge::new(
+                            collected_edges.push(Edge::new(
                                 df_edge_id,
                                 prev_event_id,
                                 event_id,
@@ -1301,15 +1342,176 @@ impl ModelCaseChecker {
                             .or_insert(1);
 
                         most_recent_event_id = Some(event_id);
+
+                        collected_edges.iter().for_each(|edge| {
+                            new_partial_case.add_edge(edge.clone());
+                        });
+
+                        // now there's the following options for a new search node: first, all open nodes matching the event cann be used as mapping
+                        // second, the new node here is not mapped to the query nodes
+                        node.open_query_nodes
+                            .iter()
+                            .filter(|node| {
+                                query_case.nodes.get(node).unwrap().oc_type_id() == event_type.0
+                            })
+                            .for_each(|open_node| {
+                                let mut new_open_node_list = node.open_query_nodes.clone();
+                                let mut new_reverse_node_mapping =
+                                    node.reverse_node_mapping.clone();
+                                let mut new_reverse_edge_mapping =
+                                    node.reverse_edge_mapping.clone();
+                                // remove open node, it is an element not an index
+                                new_open_node_list.retain(|n| n != open_node);
+
+                                // add new node to mapping
+                                new_reverse_node_mapping
+                                    .insert(event_id, RealNode(event_id, *open_node));
+
+                                let mut void_edge_count = 0;
+                                // check which edges can be assigned and which edges cannot
+                                collected_edges.iter().for_each(|edge| {
+                                    // if both nodes are corresponding in the mapping, we add it as a realEdge, otherwise as a void Edge
+                                    // for that, we look at the node mapping for each node connected to the edge
+                                    let a = new_reverse_node_mapping.get(&edge.from).unwrap();
+                                    let b = new_reverse_node_mapping.get(&edge.to).unwrap();
+
+                                    if a.is_void() || b.is_void() {
+                                        new_reverse_edge_mapping
+                                            .insert(edge.id, VoidEdge(edge.id, edge.id));
+                                        void_edge_count += 1;
+                                    } else {
+                                        // now, we need to first identify the corresponding edge in the query case graph to make a mapping possible
+                                        // for that, we need to get the node ids of the edge
+
+                                        // there should at maximum be one edge between the two nodes
+                                        if let Some(query_edge) = query_case
+                                            .get_edge_between(a.target_id(), b.target_id())
+                                        {
+                                            new_reverse_edge_mapping
+                                                .insert(edge.id, RealEdge(edge.id, query_edge.id));
+                                        } else {
+                                            // Handle the case where the edge was not found
+                                            void_edge_count += 1;
+                                            new_reverse_edge_mapping
+                                                .insert(edge.id, VoidEdge(edge.id, edge.id));
+                                        }
+                                    }
+                                });
+
+
+                                let new_min_cost = node.min_cost + void_edge_count as f64;
+
+                                transition_children.push(SearchNode::new_with_stats(
+                                    new_marking.clone(),
+                                    new_partial_case.clone(),
+                                    new_min_cost,
+                                    most_recent_event_id,
+                                    new_action_path.clone(),
+                                    new_partial_case_stats.clone(),
+                                    node.depth + 1,
+                                    node.open_query_nodes.clone(),
+                                    new_reverse_node_mapping,
+                                    new_reverse_edge_mapping,
+                                    None,
+                                ));
+                            });
+
+                        // now second
+                        {
+                            let mut new_open_node_list = node.open_query_nodes.clone();
+                            let mut new_reverse_node_mapping = node.reverse_node_mapping.clone();
+                            let mut new_reverse_edge_mapping = node.reverse_edge_mapping.clone();
+                            // remove open node, it is an element not an index
+
+                            // add new node to mapping
+                            new_reverse_node_mapping.insert(event_id, VoidNode(event_id, event_id));
+                            collected_edges.iter().for_each(|edge| {
+                                new_reverse_edge_mapping
+                                    .insert(edge.id, VoidEdge(edge.id, edge.id));
+                            });
+
+                            let new_min_cost = node.min_cost + collected_edges.len() as f64 + 1.0;
+
+                            transition_children.push(SearchNode::new_with_stats(
+                                new_marking,
+                                new_partial_case,
+                                new_min_cost,
+                                most_recent_event_id,
+                                new_action_path,
+                                new_partial_case_stats,
+                                node.depth + 1,
+                                node.open_query_nodes.clone(),
+                                new_reverse_node_mapping,
+                                new_reverse_edge_mapping,
+                                None,
+                            ));
+                        }
+                    } else {
+                        let forbidden_firings = {
+                            let mut base = forbidden_firings_per_transition.clone();
+                            // add all combinations from index 0 to index to forbidden firings
+                            // select them from filtered_forbidden_combinations
+                            // -> symmetry-breaking
+                            let forbidden_firings =
+                                filtered_forbidden_combinations[..index].to_vec();
+                            if (!forbidden_firings.is_empty()) {
+                                base.entry(transition.id)
+                                    .or_insert_with(|| vec![])
+                                    .extend(forbidden_firings);
+                            }
+                            // now, also forbid all combinations from all silent transitions with a higher lexicographical order
+                            // which are also firable in this node
+                            // first, sort all silent transitions lexicograhically by name
+
+                            let mut sorted_silent_transitions: Vec<&Transition> = self
+                                .model
+                                .transitions
+                                .values()
+                                .filter(|t| t.silent)
+                                .collect();
+                            sorted_silent_transitions.sort_by(|a, b| a.id.cmp(&b.id));
+
+                            // now, iterate over all silent transitions with a higher lexicographical order
+                            // and add all firable combinations to the forbidden firings
+                            for silent_transition in sorted_silent_transitions {
+                                if (silent_transition.id <= transition.id) {
+                                    continue;
+                                }
+                                let firable_combinations = firing_combinations_per_transition
+                                    .get(&silent_transition.id)
+                                    .unwrap();
+                                // todo consider filtering out forbidden firings
+                                base.entry(silent_transition.id)
+                                    .or_insert_with(|| vec![])
+                                    .extend(firable_combinations.iter().cloned());
+                            }
+
+                            Some(base)
+                        };
+                        transition_children.push(SearchNode::new_with_stats(
+                            new_marking,
+                            new_partial_case,
+                            node.min_cost,
+                            most_recent_event_id,
+                            new_action_path,
+                            new_partial_case_stats,
+                            node.depth + 1,
+                            node.open_query_nodes.clone(),
+                            node.reverse_node_mapping.clone(),
+                            node.reverse_edge_mapping.clone(),
+                            forbidden_firings,
+                        ));
                     }
 
-                    let new_cost = self.calculate_min_cost(
+                    /*let new_cost = self.calculate_min_cost(
                         &query_case_stats,
                         &new_partial_case_stats,
                         static_cost,
                         &new_marking,
-                    );
-
+                    );*/
+                    // fixme
+                    /*
+                    let new_cost = 99999999.0;
                     if (new_cost < node.min_cost) {
                         println!("!!!!! COST DECREASED by {} WTF", node.min_cost - new_cost);
                         self.more_epsilon_than_void_with_debug(&node.marking);
@@ -1356,67 +1558,7 @@ impl ModelCaseChecker {
                         self.more_epsilon_than_void_with_debug(&new_marking);
                         println!("-----------------");
                         query_case_stats.pretty_print_stats()
-                    }
-
-                    let forbidden_firings = if (transition.silent) {
-                        let mut base = forbidden_firings_per_transition.clone();
-                        // add all combinations from index 0 to index to forbidden firings
-                        // select them from filtered_forbidden_combinations
-                        // -> symmetry-breaking
-                        let forbidden_firings = filtered_forbidden_combinations[..index].to_vec();
-                        if (!forbidden_firings.is_empty()) {
-                            base.entry(transition.id)
-                                .or_insert_with(|| vec![])
-                                .extend(forbidden_firings);
-                        }
-                        // now, also forbid all combinations from all silent transitions with a higher lexicographical order
-                        // which are also firable in this node
-                        // first, sort all silent transitions lexicograhically by name
-
-                        let mut sorted_silent_transitions: Vec<&Transition> = self
-                            .model
-                            .transitions
-                            .values()
-                            .filter(|t| t.silent)
-                            .collect();
-                        sorted_silent_transitions.sort_by(|a, b| a.id.cmp(&b.id));
-
-                        // now, iterate over all silent transitions with a higher lexicographical order
-                        // and add all firable combinations to the forbidden firings
-                        for silent_transition in sorted_silent_transitions {
-                            if (silent_transition.id <= transition.id) {
-                                continue;
-                            }
-                            let firable_combinations = firing_combinations_per_transition
-                                .get(&silent_transition.id)
-                                .unwrap();
-                            // todo consider filtering out forbidden firings
-                            base.entry(silent_transition.id)
-                                .or_insert_with(|| vec![])
-                                .extend(firable_combinations.iter().cloned());
-                        }
-
-                        Some(base)
-                    } else {
-                        None
-                    };
-
-                    let mut new_action_path = node.action_path.clone();
-                    let new_action = Arc::new(SearchNodeAction::fire_transition(
-                        transition.id,
-                        combination.clone().clone(),
-                    ));
-                    new_action_path.push(new_action);
-                    transition_children.push(SearchNode::new_with_stats(
-                        new_marking,
-                        new_partial_case,
-                        new_cost,
-                        most_recent_event_id,
-                        new_action_path,
-                        new_partial_case_stats,
-                        node.depth + 1,
-                        forbidden_firings,
-                    ));
+                    }*/
                 });
         }
         //println!("done getting transitions");
@@ -1651,9 +1793,9 @@ mod tests {
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
             let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/costcut",
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/newnewcrash",
             )
-                .unwrap();
+            .unwrap();
             let visualized_dir =
                 Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi_visualized");
             for (case_graph, path) in case_graph_iter {
@@ -1684,7 +1826,7 @@ mod tests {
                         Format::Png,
                         Some(2.0),
                     )
-                        .unwrap();
+                    .unwrap();
 
                     export_case_graph_image(
                         &result_node.partial_case,
@@ -1725,10 +1867,9 @@ mod tests {
             let mut checker =
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
-            let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/test_data/varsbpi",
-            )
-                .unwrap();
+            let case_graph_iter =
+                CaseGraphIterator::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/test_data/varsbpi")
+                    .unwrap();
             // ensure directory stats exists or create it
             let stats_dir = Path::new("/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/stats");
             if !stats_dir.exists() {
@@ -1737,26 +1878,28 @@ mod tests {
             for (case_graph, path) in case_graph_iter {
                 let output_file_name = path.file_stem().unwrap().to_str().unwrap().to_owned();
                 let output_path = stats_dir.join(output_file_name);
-                
+
                 let case_stats = case_graph.get_case_stats();
-                
+
                 let object_count = case_graph.nodes.values().filter(|n| n.is_object()).count();
                 let event_count = case_graph.nodes.values().filter(|n| n.is_event()).count();
-                
+
                 let case_size = case_graph.nodes.len() + case_graph.edges.len();
-                
+
                 // save object_count, event_count, case_size, case_stats to a json file at output path
-                
+
                 let mut stats = HashMap::new();
                 stats.insert("object_count", object_count);
                 stats.insert("event_count", event_count);
                 stats.insert("case_size", case_size);
-                
-                let case_stats_json = serde_json::to_string(&stats).unwrap();
-                
-                fs::write(output_path.to_str().unwrap().to_owned() + "_stats.json", case_stats_json).unwrap();
 
-               
+                let case_stats_json = serde_json::to_string(&stats).unwrap();
+
+                fs::write(
+                    output_path.to_str().unwrap().to_owned() + "_stats.json",
+                    case_stats_json,
+                )
+                .unwrap();
             }
         });
         if result.is_err() {

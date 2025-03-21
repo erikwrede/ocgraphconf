@@ -136,8 +136,12 @@ impl CaseStats {
         // }
         println!("Detailed edge counts:");
         let type_storage = TYPE_STORAGE.read().unwrap();
+        let mut df_count = 0;
         for ((edge_type, from_type, to_type), count) in &self.edge_type_counts {
-            if edge_type.ne(&EdgeType::E2O) { continue; }
+            //if edge_type.ne(&EdgeType::E2O) { continue; }
+            if edge_type.eq(&EdgeType::DF) {
+                df_count += count;
+            }
             println!(
                 "Edge: ({:?},{},{}) Difference: {}",
                 edge_type,
@@ -146,6 +150,7 @@ impl CaseStats {
                 count
             );
         }
+        println!("Total DF edges: {}", df_count);
     }
 }
 // Define the CaseGraph structure
@@ -169,6 +174,10 @@ impl CaseGraph {
     pub fn get_new_id(&mut self) -> usize {
         self.counter += 1;
         self.counter
+    }
+
+    pub fn get_edge_between(&self, source_id: usize, target_id: usize) -> Option<&Edge> {
+        self.edges.values().find(|edge| edge.from == source_id && edge.to == target_id)
     }
 
     // Add a node to the graph

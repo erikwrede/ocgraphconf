@@ -5,9 +5,13 @@ use russcip::Variable;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-trait Mappable {
+pub trait Mappable {
     fn is_void(&self) -> bool;
     fn cost(&self) -> f64;
+    
+    fn source_id(&self) -> usize;
+    
+    fn target_id(&self) -> usize;
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +36,20 @@ impl Mappable for NodeMapping {
             NodeMapping::VoidNode(_, _) => 1.0,
         }
     }
+    
+    fn source_id(&self) -> usize {
+        match self {
+            NodeMapping::RealNode(id, _) => *id,
+            NodeMapping::VoidNode(id, _) => *id,
+        }
+    }
+    
+    fn target_id(&self) -> usize {
+        match self {
+            NodeMapping::RealNode(_, id) => *id,
+            NodeMapping::VoidNode(_, id) => *id,
+        }
+    }
 }
 
 impl Mappable for EdgeMapping {
@@ -42,6 +60,20 @@ impl Mappable for EdgeMapping {
         match self {
             EdgeMapping::RealEdge(_, _) => 0.0,
             EdgeMapping::VoidEdge(_, _) => 1.0,
+        }
+    }
+    
+    fn source_id(&self) -> usize {
+        match self {
+            EdgeMapping::RealEdge(id, _) => *id,
+            EdgeMapping::VoidEdge(id, _) => *id,
+        }
+    }
+    
+    fn target_id(&self) -> usize {
+        match self {
+            EdgeMapping::RealEdge(_, id) => *id,
+            EdgeMapping::VoidEdge(_, id) => *id,
         }
     }
 }
