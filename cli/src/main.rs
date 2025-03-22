@@ -145,7 +145,7 @@ fn run_controller(
     let mut running_workers: Vec<Worker> = Vec::new();
 
     // Define the timeout duration
-    let timeout = Duration::from_secs(60 * 2); // 2 minutes
+    let timeout = Duration::from_secs(60 * 5); // 2 minutes
 
     loop {
         // Spawn workers up to the limit
