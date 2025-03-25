@@ -8,10 +8,13 @@ use std::rc::Rc;
 pub trait Mappable {
     fn is_void(&self) -> bool;
     fn cost(&self) -> f64;
-    
+
     fn source_id(&self) -> usize;
-    
+
     fn target_id(&self) -> usize;
+
+    fn as_real(&self) -> Option<(usize, usize)>;
+    fn as_void(&self) -> Option<(usize, usize)>;
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +53,20 @@ impl Mappable for NodeMapping {
             NodeMapping::VoidNode(_, id) => *id,
         }
     }
+    
+    fn as_real(&self) -> Option<(usize, usize)> {
+        match self {
+            NodeMapping::RealNode(c1_node, c2_node) => Some((*c1_node, *c2_node)),
+            NodeMapping::VoidNode(_, _) => None,
+        }
+    }
+    
+    fn as_void(&self) -> Option<(usize, usize)> {
+        match self {
+            NodeMapping::VoidNode(c1_node, void_node_id) => Some((*c1_node, *void_node_id)),
+            NodeMapping::RealNode(_, _) => None,
+        }
+    }
 }
 
 impl Mappable for EdgeMapping {
@@ -76,6 +93,20 @@ impl Mappable for EdgeMapping {
             EdgeMapping::VoidEdge(_, id) => *id,
         }
     }
+    
+    fn as_real(&self) -> Option<(usize, usize)> {
+        match self {
+            EdgeMapping::RealEdge(c1_edge, c2_edge) => Some((*c1_edge, *c2_edge)),
+            EdgeMapping::VoidEdge(_, _) => None,
+        }
+    }
+    
+    fn as_void(&self) -> Option<(usize, usize)> {
+        match self {
+            EdgeMapping::VoidEdge(c1_edge, void_edge_id) => Some((*c1_edge, *void_edge_id)),
+            EdgeMapping::RealEdge(_, _) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +120,70 @@ pub struct CaseAlignment<'a> {
 }
 
 impl<'a> CaseAlignment<'a> {
+    pub fn reverse(&self) -> Self {
+        // Create reversed node mapping:
+        // For every real mapping from c1 -> c2, add a reverse mapping c2 -> c1.
+        // Then, for every node in c2 that is not mapped, add a void mapping.
+        let mut rev_node_mapping: HashMap<usize, NodeMapping> = HashMap::new();
+        for (&_c1_node, mapping) in self.node_mapping.iter() {
+            if let NodeMapping::RealNode(_, c2_node) = mapping {
+                rev_node_mapping.insert(*c2_node, NodeMapping::RealNode(*c2_node, _c1_node));
+            }
+        }
+        for (&c2_id, _node) in self.c2.nodes.iter() {
+            if !rev_node_mapping.contains_key(&c2_id) {
+                rev_node_mapping.insert(c2_id, NodeMapping::VoidNode(c2_id, c2_id));
+            }
+        }
+
+        // Create reversed edge mapping:
+        // For every real mapping from c1 -> c2, add a reverse mapping c2 -> c1.
+        // For any edge in c2 without a real mapping, mark it as void.
+        let mut rev_edge_mapping: HashMap<usize, EdgeMapping> = HashMap::new();
+        for (&_c1_edge, mapping) in self.edge_mapping.iter() {
+            if let EdgeMapping::RealEdge(_, c2_edge) = mapping {
+                rev_edge_mapping.insert(*c2_edge, EdgeMapping::RealEdge(*c2_edge, _c1_edge));
+            }
+        }
+        for (&c2_edge_id, _edge) in self.c2.edges.iter() {
+            if !rev_edge_mapping.contains_key(&c2_edge_id) {
+                rev_edge_mapping.insert(c2_edge_id, EdgeMapping::VoidEdge(c2_edge_id, c2_edge_id));
+            }
+        }
+
+        // Build void nodes and void edges from the reversed mapping
+        let rev_void_nodes: HashMap<usize, Node> = rev_node_mapping
+            .iter()
+            .filter_map(|(&node_id, mapping)| {
+                if mapping.is_void() {
+                    self.c2.nodes.get(&node_id).map(|node| (node_id, node.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let rev_void_edges: HashMap<usize, Edge> = rev_edge_mapping
+            .iter()
+            .filter_map(|(&edge_id, mapping)| {
+                if mapping.is_void() {
+                    self.c2.edges.get(&edge_id).map(|edge| (edge_id, edge.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Reverse c1 and c2 and use the reversed mappings.
+        Self {
+            c1: self.c2,
+            c2: self.c1,
+            node_mapping: rev_node_mapping,
+            edge_mapping: rev_edge_mapping,
+            void_nodes: rev_void_nodes,
+            void_edges: rev_void_edges,
+        }
+    }
+    
     pub fn align_mip(c1: &'a CaseGraph, c2: &'a CaseGraph) -> Self {
         let mut model = Model::new()
             .hide_output()

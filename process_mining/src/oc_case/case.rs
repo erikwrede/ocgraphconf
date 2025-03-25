@@ -212,7 +212,7 @@ impl CaseGraph {
     }
 
     // Retrieve outgoing edges from a node
-    pub fn get_outgoing_edges(&self, from: usize) -> Option<&Vec<usize>> {
+    pub fn get_connected_edges(&self, from: usize) -> Option<&Vec<usize>> {
         self.adjacency.get(&from)
     }
 

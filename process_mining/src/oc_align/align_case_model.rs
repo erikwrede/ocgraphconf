@@ -27,6 +27,8 @@ pub struct SearchNode {
     pub partial_case: CaseGraph,
     pub min_cost: f64,
     pub static_min_cost: f64,
+    // pub epsilon_cost: f64,
+    // pub void_cost: f64,
     most_recent_event_id: Option<usize>,
     action_path: Vec<Arc<SearchNodeAction>>,
     forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
@@ -98,6 +100,8 @@ impl SearchNode {
             action_path: action,
             depth: 0,
             forbidden_firings: None,
+            // epsilon_cost: 0.0,
+            // void_cost: 0.0,
             open_query_nodes,
             reverse_node_mapping,
             reverse_edge_mapping,
@@ -118,6 +122,8 @@ impl SearchNode {
         reverse_node_mapping: HashMap<usize, NodeMapping>,
         reverse_edge_mapping: HashMap<usize, EdgeMapping>,
         forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
+        // epsilon_cost: f64,
+        // void_cost: f64,
     ) -> Self {
         SearchNode {
             marking,
@@ -132,6 +138,8 @@ impl SearchNode {
             open_query_nodes,
             reverse_node_mapping,
             reverse_edge_mapping,
+            // epsilon_cost,
+            // void_cost,
         }
     }
 
@@ -310,7 +318,77 @@ impl ModelCaseChecker {
                 *global_upper_bound = cost;
                 *best_node = Some(node.clone());
                 println!("New best bound found: {}", cost);
+                println!("With min cost: {}", node.min_cost);
             }
+            // if cost < node.min_cost {
+            //     println!("===================");
+            //     println!("Solution: {cost}, MinCost: {}", node.min_cost);
+            //     println!("Static min cost: {}", node.static_min_cost);
+            //     println!("Epsilon cost: {}", node.epsilon_cost);
+            //     println!("Void cost: {}", node.void_cost);
+            //     println!("!!!!This is a better bound than the node min cost");
+            //     println!("Node min remaining cost: {}", node.min_cost - node.static_min_cost);
+            //     println!("===================");
+            //     
+            //     // print a picture of the alignment
+            //     export_c2_with_alignment_image(
+            //         &node.partial_case,
+            //         &alignment,
+            //         format!("./intermediates_2/alignment_{}_case_cost_{}_{}.png", counter, node.min_cost, cost).as_str(),
+            //         Format::Png,
+            //         Some(2.0),
+            //     ).unwrap();
+            //     let void_nodes: HashMap<usize, Node> = node
+            //         .reverse_node_mapping
+            //         .iter()
+            //         .filter_map(|(id, mapping)| {
+            //             if let VoidNode(_, _void_id) = mapping {
+            //                 // Assuming get_node returns a reference and you wish to clone it
+            //                 node.partial_case.get_node(*id).cloned().map(|node| (*id, node))
+            //             } else {
+            //                 None
+            //             }
+            //         })
+            //         .collect();
+            //     
+            //     let void_edges: HashMap<usize, Edge> = node
+            //         .reverse_edge_mapping
+            //         .iter()
+            //         .filter_map(|(id, mapping)| {
+            //             if let VoidEdge(_, _void_id) = mapping {
+            //                 // Assuming get_node returns a reference and you wish to clone it
+            //                 node.partial_case.get_edge(*id).cloned().map(|edge| (*id, edge))
+            //             } else {
+            //                 None
+            //             }
+            //         })
+            //         .collect();
+            //     let alignment = CaseAlignment {
+            //         c1: &node.partial_case,
+            //         c2: query_case,
+            //         void_nodes,
+            //         void_edges,
+            //         edge_mapping: node.reverse_edge_mapping.clone(),
+            //         node_mapping: node.reverse_node_mapping.clone(),
+            //     };
+            //     println!("Actual synchronous alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
+            //     // print a picture of the alignment
+            //     export_c2_with_alignment_image(
+            //         &query_case,
+            //         &alignment,
+            //         format!("./intermediates_2/alignment_{}_2case_cost_{}_{}.png", counter, node.min_cost, cost).as_str(),
+            //         Format::Png,
+            //         Some(2.0),
+            //     ).unwrap();
+            //     // print a picture of the alignment
+            //     export_c2_with_alignment_image(
+            //         &node.partial_case,
+            //         &alignment.reverse(),
+            //         format!("./intermediates_2/alignment_{}_3case_cost_{}_{}.png", counter, node.min_cost, cost).as_str(),
+            //         Format::Png,
+            //         Some(2.0),
+            //     ).unwrap();
+            // }
         }
         // Generate and sort children by increasing min_cost.
         let mut children = self.generate_children(node, query_case_stats, query_case, static_cost);
@@ -762,6 +840,10 @@ impl ModelCaseChecker {
                     // log that new best bound has been found
                     println!("New best bound found: {}", alignment_cost);
                     println!("Compared to node min cost: {}", current_node.min_cost);
+                    if(alignment_cost < current_node.min_cost) {
+                        println!("!!!!This is a better bound than the node min cost");
+                        println!("Node min remaining cost: {}", current_node.min_cost - current_node.static_min_cost);
+                    } 
 
                     global_upper_bound = alignment_cost;
                     best_node = Some(current_node.clone());
@@ -818,6 +900,16 @@ impl ModelCaseChecker {
             .map(|node_id| {
                 let node: &Node = query_case.nodes.get(node_id).unwrap();
                 let node_cost = query_case.adjacency.get(node_id).unwrap().len() + 1;
+                let node_cost = query_case
+                    .adjacency
+                    .get(node_id)
+                    .unwrap()
+                    .iter()
+                    .map(|edge| query_case.edges.get(edge).unwrap())
+                    // this is TO 
+                    // TODO add cost for df edges between two unreachable void nodes
+                    .filter(|edge| !(edge.edge_type == EdgeType::DF/* && edge.from == node.id()*/))
+                    .count() + 1;
                 let node_transition = self
                     .model
                     .transitions
@@ -1720,6 +1812,8 @@ impl ModelCaseChecker {
                                 new_reverse_node_mapping
                                     .insert(event_id, RealNode(event_id, *open_node));
 
+                                let mut edges_hit: Vec<usize> = Vec::new();
+
                                 let mut void_edge_count = 0;
                                 // check which edges can be assigned and which edges cannot
                                 collected_edges.iter().for_each(|edge| {
@@ -1742,6 +1836,7 @@ impl ModelCaseChecker {
                                         {
                                             new_reverse_edge_mapping
                                                 .insert(edge.id, RealEdge(edge.id, query_edge.id));
+                                            edges_hit.push(query_edge.id);
                                         } else {
                                             // Handle the case where the edge was not found
                                             void_edge_count += 1;
@@ -1751,7 +1846,24 @@ impl ModelCaseChecker {
                                     }
                                 });
 
-                                let new_min_cost = node.static_min_cost + void_edge_count as f64;
+                                let void_cost = query_case
+                                    .get_connected_edges(*open_node)
+                                    .unwrap()
+                                    .iter()
+                                    .map(|edge| query_case.get_edge(*edge).unwrap())
+                                    .filter(|edge| {
+                                        // edge is a df edge to the next node - we handle that in the next node coming
+                                        // fixme really? what if this is the very last node - then that should also cause cost, right?
+                                        if (edge.edge_type == EdgeType::DF  && edge.from == *open_node)
+                                        {
+                                            return false;
+                                        }
+                                        return !edges_hit.contains(&edge.id);
+                                    })
+                                    .count();
+
+                                let new_min_cost = node.static_min_cost
+                                    + void_edge_count as f64 + void_cost as f64;
 
                                 let min_remaining_cost = self.calculate_unreachable_events(
                                     &new_marking,
@@ -1794,6 +1906,8 @@ impl ModelCaseChecker {
                                     new_reverse_node_mapping,
                                     new_reverse_edge_mapping,
                                     None,
+                                    // node.epsilon_cost + void_edge_count as f64,
+                                    // node.void_cost + void_cost as f64,
                                 ));
                             });
 
@@ -1810,8 +1924,39 @@ impl ModelCaseChecker {
                                     .insert(edge.id, VoidEdge(edge.id, edge.id));
                             });
 
-                            let new_min_cost =
-                                node.static_min_cost + collected_edges.len() as f64 + 1.0;
+                            let mut void_cost = 0.0;
+                            if let Some(previous_event_id) = node.most_recent_event_id {
+                                // check if previous event id is in the mapping
+                                if let Some(previous_event) =
+                                    new_reverse_node_mapping.get(&previous_event_id)
+                                {
+                                    if !previous_event.is_void() {
+                                        // if its a real mapping, get the node with all edges from query case
+                                        // the df edge to the next node is gonna be void cost
+
+                                        let (_, previous_real_node) =
+                                            previous_event.as_real().unwrap();
+                                        let matching_df = query_case
+                                            .get_connected_edges(previous_real_node)
+                                            .unwrap()
+                                            .iter()
+                                            .map(|edge| query_case.get_edge(*edge).unwrap())
+                                            .filter(|edge| {
+                                                if (edge.edge_type == EdgeType::DF
+                                                    && edge.from == previous_real_node)
+                                                {
+                                                    return true;
+                                                }
+                                                return false;
+                                            })
+                                            .count();
+                                       void_cost += matching_df as f64;
+                                    }
+                                }
+                            }
+
+                            let mut new_min_cost =
+                                node.static_min_cost + collected_edges.len() as f64 + 1.0 + void_cost;
                             let min_remaining_cost = self.calculate_unreachable_events(
                                 &new_marking,
                                 &node.open_query_nodes,
@@ -1842,6 +1987,8 @@ impl ModelCaseChecker {
                                 new_reverse_node_mapping,
                                 new_reverse_edge_mapping,
                                 None,
+                                // node.epsilon_cost + collected_edges.len() as f64 + 1.0,
+                                // node.void_cost +void_cost,
                             ));
                         }
                     } else {
@@ -1920,6 +2067,8 @@ impl ModelCaseChecker {
                             node.reverse_node_mapping.clone(),
                             node.reverse_edge_mapping.clone(),
                             forbidden_firings,
+                            // node.epsilon_cost,
+                            // node.void_cost
                         ));
                     }
 
@@ -2213,7 +2362,7 @@ mod tests {
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
             let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/newnewcrash",
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/bound",
             )
             .unwrap();
             let visualized_dir =
@@ -2230,7 +2379,7 @@ mod tests {
                 )
                     .unwrap();*/
 
-                let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
+                let result = checker.bnb_v2(&case_graph, initial_marking.clone());
                 if let Some(result_node) = result {
                     println!("Solution found for case {:?}", path);
                     // save the alignment result as an image in a directory next to /Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi
