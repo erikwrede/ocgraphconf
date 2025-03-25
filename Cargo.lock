@@ -426,6 +426,7 @@ dependencies = [
  "clap",
  "graphviz-rust",
  "log",
+ "peak_alloc",
  "process_mining",
  "serde",
  "serde_json",
@@ -1570,6 +1571,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "peak_alloc"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29c4e8e2dd832fd76346468f822e4e600d30ba4e5aa545a128abf12cfae7ea3e"
+
+[[package]]
 name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2181,6 +2188,7 @@ dependencies = [
  "hashbag",
  "lazy_static",
  "parking_lot",
+ "peak_alloc",
  "polars",
  "quick-xml",
  "rayon",

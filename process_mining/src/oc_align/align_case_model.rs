@@ -10,13 +10,17 @@ use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
 use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
 use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 use graphviz_rust::cmd::Format;
+use peak_alloc::PeakAlloc;
 use std::any::Any;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Add, Deref, Not};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+#[global_allocator]
+static PEAK_ALLOC: PeakAlloc = PeakAlloc;
 #[derive(Debug, Clone)]
 pub struct SearchNode {
     marking: Marking,
@@ -26,7 +30,7 @@ pub struct SearchNode {
     most_recent_event_id: Option<usize>,
     action_path: Vec<Arc<SearchNodeAction>>,
     forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
-    open_query_nodes: Vec<usize>,// FIXME dont use hashmap
+    open_query_nodes: Vec<usize>, // FIXME dont use hashmap
     reverse_node_mapping: HashMap<usize, NodeMapping>, // cp_node_id -> query case mapping
     reverse_edge_mapping: HashMap<usize, EdgeMapping>, // cp_edge_id -> query case mapping
 
@@ -264,6 +268,111 @@ impl ModelCaseChecker {
         }
     }
 
+    /// Recursive DFS branch&amp;bound with progress updates.
+    fn dfs_branch_and_bound_progress(
+        &mut self,
+        node: &SearchNode,
+        query_case: &CaseGraph,
+        query_case_stats: &CaseStats,
+        static_cost: f64,
+        global_upper_bound: &mut f64,
+        best_node: &mut Option<SearchNode>,
+        counter: &mut usize,
+        start_time: Instant,
+        last_update: &mut Instant,
+    ) {
+        *counter += 1;
+        if node.min_cost >= *global_upper_bound {
+            return;
+        }
+        // Print progress update every 30 seconds.
+        if last_update.elapsed() >= Duration::from_secs(30) {
+            *last_update = Instant::now();
+            println!("------------------ Progress Update ------------------");
+            println!("Nodes explored: {}", counter);
+            println!(
+                "Elapsed time: {:.2} seconds",
+                start_time.elapsed().as_secs_f64()
+            );
+            println!("Current node min cost: {}", node.min_cost);
+            println!("Global upper bound: {}", global_upper_bound);
+            let current_mem = PEAK_ALLOC.current_usage_as_mb();
+            println!("This program currently uses {} MB of RAM.", current_mem);
+            let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
+            println!("The max amount that was used {}", peak_mem);
+            println!("------------------------------------------------------");
+        }
+        // Check if node is accepting and update upper bound if needed.
+        if node.marking.is_final_has_tokens() {
+            let alignment = CaseAlignment::align_mip(query_case, &node.partial_case);
+            let cost = alignment.total_cost().unwrap();
+            if cost < *global_upper_bound {
+                *global_upper_bound = cost;
+                *best_node = Some(node.clone());
+                println!("New best bound found: {}", cost);
+            }
+        }
+        // Generate and sort children by increasing min_cost.
+        let mut children = self.generate_children(node, query_case_stats, query_case, static_cost);
+        children.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+        // Explore children if promising.
+        for child in children {
+            if child.min_cost < *global_upper_bound {
+                self.dfs_branch_and_bound_progress(
+                    &child,
+                    query_case,
+                    query_case_stats,
+                    static_cost,
+                    global_upper_bound,
+                    best_node,
+                    counter,
+                    start_time,
+                    last_update,
+                );
+            }
+        }
+    }
+
+    /// bnb_v2_progress initializes DFS branch&amp;bound DFS with progress updates.
+    pub fn bnb_v2(
+        &mut self,
+        query_case: &CaseGraph,
+        initial_marking: Marking,
+    ) -> Option<SearchNode> {
+        let query_case_stats = query_case.get_case_stats();
+        query_case_stats.pretty_print_stats();
+        let static_cost = self.calculate_query_static_costs(query_case, &query_case_stats);
+
+        // Initialize root node.
+        let root_node =
+            self.initialize_node_with_initial_places(query_case, initial_marking, static_cost);
+        let mut best_node: Option<SearchNode> = None;
+        let mut global_upper_bound = if let Some(shortest_case) = &self.shortest_case {
+            let alignment = CaseAlignment::align_mip(query_case, shortest_case);
+            alignment.total_cost().unwrap_or(f64::INFINITY)
+        } else {
+            f64::INFINITY
+        };
+
+        let mut counter = 0;
+        let start_time = Instant::now();
+        let mut last_update = Instant::now();
+
+        self.dfs_branch_and_bound_progress(
+            &root_node,
+            query_case,
+            &query_case_stats,
+            static_cost,
+            &mut global_upper_bound,
+            &mut best_node,
+            &mut counter,
+            start_time,
+            &mut last_update,
+        );
+        println!("Total nodes explored (DFS branch-and-bound): {}", counter);
+        best_node
+    }
+
     fn initialize_node_with_initial_places(
         &mut self,
         query_case: &CaseGraph,
@@ -387,7 +496,7 @@ impl ModelCaseChecker {
             ));
         }
 
-        let mut open_list: BinaryHeap<OrderedSearchNode> = BinaryHeap::with_capacity(60_000_000);
+        let mut open_list: BinaryHeap<OrderedSearchNode> = BinaryHeap::with_capacity(20_000_000);
 
         open_list.push(
             self.initialize_node_with_initial_places(
@@ -434,10 +543,13 @@ impl ModelCaseChecker {
             if current_node.min_cost >= global_upper_bound {
                 break;
             }
-            if(global_lower_bound > current_node.min_cost) {
+            if (global_lower_bound > current_node.min_cost) {
                 println!("Old lb {}", global_lower_bound);
                 println!("New lb {}", current_node.min_cost);
-                println!("share of heuristic {}", current_node.min_cost -current_node.static_min_cost);
+                println!(
+                    "share of heuristic {}",
+                    current_node.min_cost - current_node.static_min_cost
+                );
                 panic!("Lower bound decreased wtf!")
             }
             global_lower_bound = current_node.min_cost;
@@ -456,7 +568,23 @@ impl ModelCaseChecker {
                 println!("Open list length: {}", open_list.len());
                 println!("Current node min cost: {}", current_node.min_cost);
                 println!("Global Upper Bound: {}", global_upper_bound);
+                let current_mem = PEAK_ALLOC.current_usage_as_mb();
+                println!("This program currently uses {} MB of RAM.", current_mem);
+                let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
+                println!("The max amount that was used {}", peak_mem);
                 println!("---------------------");
+                // please output a histogram of costs in the open list
+                let mut histogram: HashMap<usize, usize> = HashMap::new();
+                for node in &open_list {
+                    let cost = node.0.min_cost as usize;
+                    *histogram.entry(cost).or_insert(0) += 1;
+                }
+                let mut histogram_vec: Vec<(usize, usize)> = histogram.into_iter().collect();
+                histogram_vec.sort_by(|a, b| a.0.cmp(&b.0));
+                println!("Histogram of costs in open list:");
+                for (cost, count) in histogram_vec {
+                    println!("Cost: {} Count: {}", cost, count);
+                }
                 // println!("Current node partial case stats:");
                 // current_node.partial_case_stats.pretty_print_stats();
                 // println!("---------------------");
@@ -750,7 +878,7 @@ impl ModelCaseChecker {
             //println!("Successfully added {} remaining cost", cost)
         }
         let mut more_epsilon_cost = 0;
-        if(cost_list.len() == open_query_nodes.len()) {
+        if (cost_list.len() == open_query_nodes.len()) {
             // remaining cost
             //println!("Adding remaining cost!");
             marking
@@ -778,7 +906,7 @@ impl ModelCaseChecker {
             //
         }
 
-        return cost +more_epsilon_cost;
+        return cost + more_epsilon_cost;
     }
 
     fn calculate_unreachable_events_verbose(
@@ -841,11 +969,26 @@ impl ModelCaseChecker {
                 let all_reachable = b_input_object_types.values().all(|v| *v);
 
                 if (!all_reachable) {
-                    println!("not all reachable for transition {}", node_transition.unwrap().name);
-                    println!("not all reachable for transition {}", node_transition.unwrap().name);
-                    println!("not all reachable for transition {}", node_transition.unwrap().name);
-                    println!("not all reachable for transition {}", node_transition.unwrap().name);
-                    println!("not all reachable for transition {}", node_transition.unwrap().name);
+                    println!(
+                        "not all reachable for transition {}",
+                        node_transition.unwrap().name
+                    );
+                    println!(
+                        "not all reachable for transition {}",
+                        node_transition.unwrap().name
+                    );
+                    println!(
+                        "not all reachable for transition {}",
+                        node_transition.unwrap().name
+                    );
+                    println!(
+                        "not all reachable for transition {}",
+                        node_transition.unwrap().name
+                    );
+                    println!(
+                        "not all reachable for transition {}",
+                        node_transition.unwrap().name
+                    );
                     return node_cost;
                 }
                 return 0;
@@ -857,9 +1000,8 @@ impl ModelCaseChecker {
             println!("Successfully added {} remaining cost", cost)
         }
 
-        if(cost_list.len() == open_query_nodes.len()) {
+        if (cost_list.len() == open_query_nodes.len()) {
             // remaining cost
-
         }
         println!("i was called with cost!");
 
@@ -1617,12 +1759,14 @@ impl ModelCaseChecker {
                                     query_case,
                                 );
 
-
-                                if(node.min_cost > new_min_cost + min_remaining_cost as f64) {
+                                if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
                                     println!("Old lb {}", node.min_cost);
                                     println!("New lb {}", new_min_cost + min_remaining_cost as f64);
                                     println!("share of heuristic {}", min_remaining_cost);
-                                    println!("Old share of heuristic {}", node.min_cost - node.static_min_cost);
+                                    println!(
+                                        "Old share of heuristic {}",
+                                        node.min_cost - node.static_min_cost
+                                    );
                                     let cost_old = self.calculate_unreachable_events_verbose(
                                         &node.marking,
                                         &node.open_query_nodes,
@@ -1666,21 +1810,25 @@ impl ModelCaseChecker {
                                     .insert(edge.id, VoidEdge(edge.id, edge.id));
                             });
 
-                            let new_min_cost = node.static_min_cost + collected_edges.len() as f64 + 1.0;
+                            let new_min_cost =
+                                node.static_min_cost + collected_edges.len() as f64 + 1.0;
                             let min_remaining_cost = self.calculate_unreachable_events(
                                 &new_marking,
                                 &node.open_query_nodes,
                                 query_case,
                             );
 
-                            if(node.min_cost > new_min_cost + min_remaining_cost as f64) {
+                            if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
                                 println!("Old lb {}", node.min_cost);
                                 println!("New lb {}", new_min_cost + min_remaining_cost as f64);
                                 println!("share of heuristic {}", min_remaining_cost);
-                                println!("Old share of heuristic {}", node.min_cost - node.static_min_cost);
+                                println!(
+                                    "Old share of heuristic {}",
+                                    node.min_cost - node.static_min_cost
+                                );
                                 panic!("Lower bound decreased wtf2!")
                             }
-                            
+
                             transition_children.push(SearchNode::new_with_stats(
                                 new_marking,
                                 new_partial_case,
@@ -1745,15 +1893,20 @@ impl ModelCaseChecker {
                             query_case,
                         );
 
-
-                        if(node.min_cost > node.static_min_cost + min_remaining_cost as f64) {
+                        if (node.min_cost > node.static_min_cost + min_remaining_cost as f64) {
                             println!("Old lb {}", node.min_cost);
-                            println!("New lb {}", node.static_min_cost + min_remaining_cost as f64);
+                            println!(
+                                "New lb {}",
+                                node.static_min_cost + min_remaining_cost as f64
+                            );
                             println!("share of heuristic {}", min_remaining_cost);
-                            println!("Old share of heuristic {}", node.min_cost - node.static_min_cost);
+                            println!(
+                                "Old share of heuristic {}",
+                                node.min_cost - node.static_min_cost
+                            );
                             panic!("Lower bound decreased wtf3!")
                         }
-                        
+
                         transition_children.push(SearchNode::new_with_stats(
                             new_marking,
                             new_partial_case,

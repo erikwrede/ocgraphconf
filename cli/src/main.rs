@@ -135,7 +135,7 @@ fn run_controller(
         Ok(n) => n.get(),
         Err(_) => 4, // Fallback to 4 if unable to determine
     };
-    let num_workers = 1; // Overriding to 10 as per original code
+    let num_workers = 6; // Overriding to 10 as per original code
     println!("Using {} concurrent workers.", num_workers);
 
     // Iterator over case_graph_files
@@ -145,7 +145,7 @@ fn run_controller(
     let mut running_workers: Vec<Worker> = Vec::new();
 
     // Define the timeout duration
-    let timeout = Duration::from_secs(60 * 5); // 2 minutes
+    let timeout = Duration::from_secs(60 * 45); // 2 minutes
 
     loop {
         // Spawn workers up to the limit
@@ -439,7 +439,7 @@ fn run_worker(
     )?;
 
     // Run branch_and_bound
-    let result = checker.branch_and_bound(&case_graph, initial_marking.clone());
+    let result = checker.bnb_v2(&case_graph, initial_marking.clone());
     if let Some(result_node) = result {
         println!("Solution found for case {:?}", file_stem);
         // Align and calculate cost
