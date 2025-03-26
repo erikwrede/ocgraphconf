@@ -10,13 +10,16 @@ use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
 use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
 use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
 use graphviz_rust::cmd::Format;
+use parking_lot::Mutex;
 use peak_alloc::PeakAlloc;
 use std::any::Any;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::hash::Hash;
 use std::ops::{Add, Deref, Not};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use graphviz_rust::attributes::shape::circle;
 use uuid::Uuid;
 
 #[global_allocator]
@@ -27,8 +30,8 @@ pub struct SearchNode {
     pub partial_case: CaseGraph,
     pub min_cost: f64,
     pub static_min_cost: f64,
-    // pub epsilon_cost: f64,
-    // pub void_cost: f64,
+    pub epsilon_cost: f64,
+    pub void_cost: f64,
     most_recent_event_id: Option<usize>,
     action_path: Vec<Arc<SearchNodeAction>>,
     forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
@@ -100,8 +103,8 @@ impl SearchNode {
             action_path: action,
             depth: 0,
             forbidden_firings: None,
-            // epsilon_cost: 0.0,
-            // void_cost: 0.0,
+            epsilon_cost: 0.0,
+            void_cost: 0.0,
             open_query_nodes,
             reverse_node_mapping,
             reverse_edge_mapping,
@@ -122,8 +125,8 @@ impl SearchNode {
         reverse_node_mapping: HashMap<usize, NodeMapping>,
         reverse_edge_mapping: HashMap<usize, EdgeMapping>,
         forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
-        // epsilon_cost: f64,
-        // void_cost: f64,
+        epsilon_cost: f64,
+        void_cost: f64,
     ) -> Self {
         SearchNode {
             marking,
@@ -138,8 +141,8 @@ impl SearchNode {
             open_query_nodes,
             reverse_node_mapping,
             reverse_edge_mapping,
-            // epsilon_cost,
-            // void_cost,
+            epsilon_cost,
+            void_cost,
         }
     }
 
@@ -211,7 +214,13 @@ impl SearchNodeAction {
                     .map(|binding_info| {
                         let object_name = binding_info.object_type.clone();
                         let token_count = binding_info.tokens.len();
-                        format!("{}: {}", object_name, token_count)
+                        let token_ids_stringified = binding_info
+                            .tokens
+                            .iter()
+                            .map(|token| token.id.to_string())
+                            .collect::<Vec<String>>()
+                            .join(", ");
+                        format!("{}: {}", object_name, token_ids_stringified)
                     })
                     .collect();
 
@@ -250,6 +259,14 @@ pub struct ModelCaseChecker {
     shortest_case: Option<CaseGraph>,
     model_transitions: HashSet<String>,
 }
+static TRACE_GEN_CHILDREN: Mutex<bool> = Mutex::new(false);
+fn read_flag() -> bool {
+    *TRACE_GEN_CHILDREN.lock()
+}
+
+fn write_flag(val: bool) {
+    *TRACE_GEN_CHILDREN.lock() = val;
+}
 impl ModelCaseChecker {
     pub fn new(model: Arc<ObjectCentricPetriNet>) -> Self {
         ModelCaseChecker {
@@ -274,6 +291,137 @@ impl ModelCaseChecker {
             model,
             shortest_case: Some(shortest_case),
         }
+    }
+    pub fn bnb_v3(
+        &mut self,
+        query_case: &CaseGraph,
+        initial_marking: Marking,
+    ) -> Option<SearchNode> {
+        let query_case_stats = query_case.get_case_stats();
+        query_case_stats.pretty_print_stats();
+        let static_cost = self.calculate_query_static_costs(query_case, &query_case_stats);
+
+        // Initialize root node.
+        let root_node =
+            self.initialize_node_with_initial_places(query_case, initial_marking, static_cost);
+        let mut best_node: Option<SearchNode> = None;
+        let mut global_upper_bound = if let Some(shortest_case) = &self.shortest_case {
+            let alignment = CaseAlignment::align_mip(query_case, shortest_case);
+            alignment.total_cost().unwrap_or(f64::INFINITY)
+        } else {
+            f64::INFINITY
+        };
+
+        let mut counter = 0;
+        let start_time = Instant::now();
+        let mut last_update = Instant::now();
+        let mut stack: Vec<SearchNode> = Vec::with_capacity(200000);
+        stack.push(root_node);
+
+        while let Some(node) = stack.pop() {
+            counter += 1;
+            if node.min_cost >= global_upper_bound {
+                continue;
+            }
+            // Print progress update every 30 seconds.
+            if last_update.elapsed() >= Duration::from_secs(30) {
+                last_update = Instant::now();
+                println!("------------------ Progress Update ------------------");
+                println!("Nodes explored: {}", counter);
+                println!(
+                    "Elapsed time: {:.2} seconds",
+                    start_time.elapsed().as_secs_f64()
+                );
+                println!("Current node min cost: {}", node.min_cost);
+                println!("Global upper bound: {}", global_upper_bound);
+                let current_mem = PEAK_ALLOC.current_usage_as_mb();
+                println!("This program currently uses {} MB of RAM.", current_mem);
+                let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
+                println!("The max amount that was used {}", peak_mem);
+                println!("------------------------------------------------------");
+            }
+            // Check if node is accepting and update upper bound if needed.
+            if node.marking.is_final_has_tokens() {
+                let alignment = CaseAlignment::align_mip(query_case, &node.partial_case);
+                let cost = alignment.total_cost().unwrap();
+                if cost < global_upper_bound {
+                    global_upper_bound = cost;
+                    best_node = Some(node.clone());
+                    println!("New best bound found: {}", cost);
+                    println!("With min cost: {}", node.min_cost);
+                    println!("static share: {}", node.min_cost - node.static_min_cost);
+                    println!("Epsilon cost: {}", node.epsilon_cost);
+                    println!("Void cost: {}", node.void_cost);
+
+                    let void_nodes: HashMap<usize, Node> = node
+                        .reverse_node_mapping
+                        .iter()
+                        .filter_map(|(id, mapping)| {
+                            if let VoidNode(_, _void_id) = mapping {
+                                node.partial_case
+                                    .get_node(*id)
+                                    .cloned()
+                                    .map(|node| (*id, node))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let void_edges: HashMap<usize, Edge> = node
+                        .reverse_edge_mapping
+                        .iter()
+                        .filter_map(|(id, mapping)| {
+                            if let VoidEdge(_, _void_id) = mapping {
+                                node.partial_case
+                                    .get_edge(*id)
+                                    .cloned()
+                                    .map(|edge| (*id, edge))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let alignment = CaseAlignment {
+                        c1: &node.partial_case,
+                        c2: query_case,
+                        void_nodes,
+                        void_edges,
+                        edge_mapping: node.reverse_edge_mapping.clone(),
+                        node_mapping: node.reverse_node_mapping.clone(),
+                    };
+
+                    if alignment.total_cost().unwrap() < node.min_cost {
+                        println!("New best bound found: {}", cost);
+                        println!("With min cost: {}", node.min_cost);
+                        println!("static share: {}", node.min_cost - node.static_min_cost);
+                        println!("Epsilon cost: {}", node.epsilon_cost);
+                        println!("Void cost: {}", node.void_cost);
+                        panic!("MinCost incorrect")
+                    }
+                    println!(
+                        "Actual synchronous alignment cost: {}",
+                        alignment.total_cost().unwrap_or(f64::INFINITY)
+                    );
+                }
+            }
+            // Generate and sort children by increasing min_cost.
+            let mut children =
+                self.generate_children(&node, &query_case_stats, query_case, static_cost);
+            children.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+            // Push children in reverse order so that the child with the smallest min_cost is processed first.
+            for child in children.into_iter().rev() {
+                if child.min_cost < global_upper_bound {
+                    stack.push(child);
+                }
+            }
+        }
+        println!(
+            "Total nodes explored (iterative branch-and-bound): {}",
+            counter
+        );
+        best_node
     }
 
     /// Recursive DFS branch&amp;bound with progress updates.
@@ -314,55 +462,151 @@ impl ModelCaseChecker {
         if node.marking.is_final_has_tokens() {
             let alignment = CaseAlignment::align_mip(query_case, &node.partial_case);
             let cost = alignment.total_cost().unwrap();
+            if (counter > &mut 200000 && false) {
+                export_c2_with_alignment_image(
+                    &node.partial_case,
+                    &alignment,
+                    format!(
+                        "./intermediates_2/xxx{}_1case_cost_{}_{}.png",
+                        counter, node.min_cost, cost
+                    )
+                    .as_str(),
+                    Format::Png,
+                    Some(2.0),
+                )
+                .unwrap();
+                let void_nodes: HashMap<usize, Node> = node
+                    .reverse_node_mapping
+                    .iter()
+                    .filter_map(|(id, mapping)| {
+                        if let VoidNode(_, _void_id) = mapping {
+                            // Assuming get_node returns a reference and you wish to clone it
+                            node.partial_case
+                                .get_node(*id)
+                                .cloned()
+                                .map(|node| (*id, node))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let void_edges: HashMap<usize, Edge> = node
+                    .reverse_edge_mapping
+                    .iter()
+                    .filter_map(|(id, mapping)| {
+                        if let VoidEdge(_, _void_id) = mapping {
+                            // Assuming get_node returns a reference and you wish to clone it
+                            node.partial_case
+                                .get_edge(*id)
+                                .cloned()
+                                .map(|edge| (*id, edge))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let alignment = CaseAlignment {
+                    c1: &node.partial_case,
+                    c2: query_case,
+                    void_nodes,
+                    void_edges,
+                    edge_mapping: node.reverse_edge_mapping.clone(),
+                    node_mapping: node.reverse_node_mapping.clone(),
+                };
+                println!(
+                    "Actual synchronous alignment cost: {}",
+                    alignment.total_cost().unwrap_or(f64::INFINITY)
+                );
+                // print a picture of the alignment
+                export_c2_with_alignment_image(
+                    &query_case,
+                    &alignment,
+                    format!(
+                        "./intermediates_2/xxx{}_2case_cost_{}_{}.png",
+                        counter, node.min_cost, cost
+                    )
+                    .as_str(),
+                    Format::Png,
+                    Some(2.0),
+                )
+                .unwrap();
+                // print a picture of the alignment
+                export_c2_with_alignment_image(
+                    &node.partial_case,
+                    &alignment.reverse(),
+                    format!(
+                        "./intermediates_2/xxx{}_3case_cost_{}_{}.png",
+                        counter, node.min_cost, cost
+                    )
+                    .as_str(),
+                    Format::Png,
+                    Some(2.0),
+                )
+                .unwrap();
+            }
             if cost < *global_upper_bound {
                 *global_upper_bound = cost;
                 *best_node = Some(node.clone());
                 println!("New best bound found: {}", cost);
                 println!("With min cost: {}", node.min_cost);
                 println!("static share: {}", node.min_cost - node.static_min_cost);
-                
-                    export_c2_with_alignment_image(
-                        &node.partial_case,
-                        &alignment,
-                        format!("./intermediates_2/alignment_{}_1case_cost_{}_{}.png", counter, node.min_cost, cost).as_str(),
-                        Format::Png,
-                        Some(2.0),
-                    ).unwrap();
-                    let void_nodes: HashMap<usize, Node> = node
-                        .reverse_node_mapping
-                        .iter()
-                        .filter_map(|(id, mapping)| {
-                            if let VoidNode(_, _void_id) = mapping {
-                                // Assuming get_node returns a reference and you wish to clone it
-                                node.partial_case.get_node(*id).cloned().map(|node| (*id, node))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    
-                    let void_edges: HashMap<usize, Edge> = node
-                        .reverse_edge_mapping
-                        .iter()
-                        .filter_map(|(id, mapping)| {
-                            if let VoidEdge(_, _void_id) = mapping {
-                                // Assuming get_node returns a reference and you wish to clone it
-                                node.partial_case.get_edge(*id).cloned().map(|edge| (*id, edge))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    let alignment = CaseAlignment {
-                        c1: &node.partial_case,
-                        c2: query_case,
-                        void_nodes,
-                        void_edges,
-                        edge_mapping: node.reverse_edge_mapping.clone(),
-                        node_mapping: node.reverse_node_mapping.clone(),
-                    };
-                
-                if(alignment.total_cost().unwrap() < node.min_cost) {
+                println!("Epsilon cost: {}", node.epsilon_cost);
+                println!("Void cost: {}", node.void_cost);
+
+                // export_c2_with_alignment_image(
+                //     &node.partial_case,
+                //     &alignment,
+                //     format!(
+                //         "./intermediates_2/alignment_{}_1case_cost_{}_{}.png",
+                //         counter, node.min_cost, cost
+                //     )
+                //     .as_str(),
+                //     Format::Png,
+                //     Some(2.0),
+                // )
+                // .unwrap();
+                let void_nodes: HashMap<usize, Node> = node
+                    .reverse_node_mapping
+                    .iter()
+                    .filter_map(|(id, mapping)| {
+                        if let VoidNode(_, _void_id) = mapping {
+                            // Assuming get_node returns a reference and you wish to clone it
+                            node.partial_case
+                                .get_node(*id)
+                                .cloned()
+                                .map(|node| (*id, node))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let void_edges: HashMap<usize, Edge> = node
+                    .reverse_edge_mapping
+                    .iter()
+                    .filter_map(|(id, mapping)| {
+                        if let VoidEdge(_, _void_id) = mapping {
+                            // Assuming get_node returns a reference and you wish to clone it
+                            node.partial_case
+                                .get_edge(*id)
+                                .cloned()
+                                .map(|edge| (*id, edge))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let alignment = CaseAlignment {
+                    c1: &node.partial_case,
+                    c2: query_case,
+                    void_nodes,
+                    void_edges,
+                    edge_mapping: node.reverse_edge_mapping.clone(),
+                    node_mapping: node.reverse_node_mapping.clone(),
+                };
+
+                if (alignment.total_cost().unwrap() < node.min_cost) {
                     println!("New best bound found: {}", cost);
                     println!("With min cost: {}", node.min_cost);
                     println!("static share: {}", node.min_cost - node.static_min_cost);
@@ -370,23 +614,36 @@ impl ModelCaseChecker {
                     println!("Void cost: {}", node.void_cost);
                     panic!("MinCost incorrect")
                 }
-                    println!("Actual synchronous alignment cost: {}", alignment.total_cost().unwrap_or(f64::INFINITY));
-                    // print a picture of the alignment
-                    export_c2_with_alignment_image(
-                        &query_case,
-                        &alignment,
-                        format!("./intermediates_2/alignment_{}_2case_cost_{}_{}.png", counter, node.min_cost, cost).as_str(),
-                        Format::Png,
-                        Some(2.0),
-                    ).unwrap();
-                    // print a picture of the alignment
-                    export_c2_with_alignment_image(
-                        &node.partial_case,
-                        &alignment.reverse(),
-                        format!("./intermediates_2/alignment_{}_3case_cost_{}_{}.png", counter, node.min_cost, cost).as_str(),
-                        Format::Png,
-                        Some(2.0),
-                    ).unwrap();
+                println!(
+                    "Actual synchronous alignment cost: {}",
+                    alignment.total_cost().unwrap_or(f64::INFINITY)
+                );
+                // print a picture of the alignment
+                // export_c2_with_alignment_image(
+                //     &query_case,
+                //     &alignment,
+                //     format!(
+                //         "./intermediates_2/alignment_{}_2case_cost_{}_{}.png",
+                //         counter, node.min_cost, cost
+                //     )
+                //     .as_str(),
+                //     Format::Png,
+                //     Some(2.0),
+                // )
+                // .unwrap();
+                // // print a picture of the alignment
+                // export_c2_with_alignment_image(
+                //     &node.partial_case,
+                //     &alignment.reverse(),
+                //     format!(
+                //         "./intermediates_2/alignment_{}_3case_cost_{}_{}.png",
+                //         counter, node.min_cost, cost
+                //     )
+                //     .as_str(),
+                //     Format::Png,
+                //     Some(2.0),
+                // )
+                // .unwrap();
             }
             // if cost < node.min_cost {
             //     println!("===================");
@@ -397,7 +654,7 @@ impl ModelCaseChecker {
             //     println!("!!!!This is a better bound than the node min cost");
             //     println!("Node min remaining cost: {}", node.min_cost - node.static_min_cost);
             //     println!("===================");
-            //     
+            //
             //     // print a picture of the alignment
             //     export_c2_with_alignment_image(
             //         &node.partial_case,
@@ -418,7 +675,7 @@ impl ModelCaseChecker {
             //             }
             //         })
             //         .collect();
-            //     
+            //
             //     let void_edges: HashMap<usize, Edge> = node
             //         .reverse_edge_mapping
             //         .iter()
@@ -908,10 +1165,13 @@ impl ModelCaseChecker {
                     // log that new best bound has been found
                     println!("New best bound found: {}", alignment_cost);
                     println!("Compared to node min cost: {}", current_node.min_cost);
-                    if(alignment_cost < current_node.min_cost) {
+                    if (alignment_cost < current_node.min_cost) {
                         println!("!!!!This is a better bound than the node min cost");
-                        println!("Node min remaining cost: {}", current_node.min_cost - current_node.static_min_cost);
-                    } 
+                        println!(
+                            "Node min remaining cost: {}",
+                            current_node.min_cost - current_node.static_min_cost
+                        );
+                    }
 
                     global_upper_bound = alignment_cost;
                     best_node = Some(current_node.clone());
@@ -974,10 +1234,11 @@ impl ModelCaseChecker {
                     .unwrap()
                     .iter()
                     .map(|edge| query_case.edges.get(edge).unwrap())
-                    // this is TO 
+                    // this is TO
                     // TODO add cost for df edges between two unreachable void nodes
                     .filter(|edge| !(edge.edge_type == EdgeType::DF && edge.from == node.id()))
-                    .count() + 1;
+                    .count()
+                    + 1;
                 let node_transition = self
                     .model
                     .transitions
@@ -1542,6 +1803,162 @@ impl ModelCaseChecker {
             .cloned()
             .collect()
     }
+
+    #[inline(always)]
+    fn iterate_enabled_firings<'a>(
+        &'a self,
+        marking: &'a Marking,
+        forbidden_firings: &'a Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
+    ) -> impl Iterator<Item = (Arc<Binding>, Option<HashMap<Uuid, Vec<Arc<Binding>>>>)> + 'a {
+        let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
+
+        let mut firing_combinations_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> =
+            HashMap::new();
+
+        let mut forbidden_firings_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> = HashMap::new();
+
+        for transition in self.model.transitions.values() {
+            //println!("Transition: {}", transition.name);
+            let firing_combinations = marking.get_firing_combinations(transition);
+            if (firing_combinations.len() > 0) {
+                //println!("{}",transition.name);
+                //println!("Firing combinations: {:?}", firing_combinations.iter().map(|c| c.to_string()).collect::<Vec<String>>());
+            }
+
+            transition_enabled.insert(transition.id, firing_combinations.len() > 0);
+            let firing_combinations: Vec<Arc<Binding>> =
+                firing_combinations.into_iter().map(Arc::new).collect();
+
+            if (!transition.silent) {
+                forbidden_firings_per_transition
+                    .insert(transition.id, firing_combinations.iter().cloned().collect());
+            }
+
+            firing_combinations_per_transition.insert(transition.id, firing_combinations);
+        }
+
+        if let Some(forbidden_firings_previous) = forbidden_firings {
+            // if this is the case, merge forbidden_firings_per_transition with forbidden_firings_previous
+            for (transition_id, forbidden_firings_to_extend) in forbidden_firings_previous {
+                let forbidden_firings = forbidden_firings_per_transition
+                    .entry(*transition_id)
+                    .or_insert_with(|| vec![]);
+                forbidden_firings.extend(forbidden_firings_to_extend.iter().cloned());
+            }
+        }
+
+        self.model.transitions.values().flat_map(move |transition| {
+            let firing_combinations = firing_combinations_per_transition
+                .get(&transition.id)
+                .unwrap();
+            if firing_combinations.is_empty() {
+                // return empty iterator without allocating
+                return vec![];
+            }
+
+            // Filter combinations based on symmetry breaking
+            let filtered_combinations = firing_combinations;
+            // fixme fix this for arbitrary object sets, respecting the edge mapping
+            //self.filter_firing_combinations(&firing_combinations, transition, node);
+
+            if (filtered_combinations.is_empty()) {
+                panic!("No filtered combinations?!");
+            }
+
+            if (filtered_combinations.len() < firing_combinations.len()) {
+                //println!("Filtered out {} combinations", firing_combinations.len() - filtered_combinations.len());
+            }
+
+            // filter out forbidden firings, meaning filter out all bindings from filteredCombinations that are in searchNode.forbiddenFirings
+
+            let mut filtered_forbidden_combinations = match forbidden_firings {
+                Some(forbidden_firings_per_t) => {
+                    let forbidden_firings = forbidden_firings_per_t.get(&transition.id);
+                    if (forbidden_firings.is_none()) {
+                        filtered_combinations.clone()
+                    } else {
+                        let forbidden_firings = forbidden_firings.unwrap();
+                        filtered_combinations
+                            .iter()
+                            .filter_map(|combination| {
+                                if (forbidden_firings.contains(combination)) {
+                                    return None;
+                                }
+                                return Some(combination);
+                            })
+                            .cloned()
+                            .collect()
+                    }
+                }
+                None => filtered_combinations.clone(),
+            };
+            let filtered_out_len =
+                filtered_combinations.len() - filtered_forbidden_combinations.len();
+
+            if (filtered_out_len > 0) {
+                //println!("Filtered out {} forbidden combinations", filtered_out_len);
+            }
+
+            if (transition.silent) {
+                filtered_forbidden_combinations.sort_by(|a, b| compare_bindings(a, b));
+
+                return filtered_forbidden_combinations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, combination)| {
+                        let forbidden_firings = {
+                            let mut base = forbidden_firings_per_transition.clone();
+                            // add all combinations from index 0 to index to forbidden firings
+                            // select them from filtered_forbidden_combinations
+                            // -> symmetry-breaking
+                            let forbidden_firings =
+                                filtered_forbidden_combinations[..index].to_vec();
+                            if (!forbidden_firings.is_empty()) {
+                                base.entry(transition.id)
+                                    .or_insert_with(|| vec![])
+                                    .extend(forbidden_firings);
+                            }
+                            // now, also forbid all combinations from all silent transitions with a higher lexicographical order
+                            // which are also firable in this node
+                            // first, sort all silent transitions lexicograhically by name
+
+                            let mut sorted_silent_transitions: Vec<&Transition> = self
+                                .model
+                                .transitions
+                                .values()
+                                .filter(|t| t.silent)
+                                .collect();
+                            sorted_silent_transitions.sort_by(|a, b| a.id.cmp(&b.id));
+
+                            // now, iterate over all silent transitions with a higher lexicographical order
+                            // and add all firable combinations to the forbidden firings
+                            for silent_transition in sorted_silent_transitions {
+                                if (silent_transition.id <= transition.id) {
+                                    continue;
+                                }
+                                let firable_combinations = firing_combinations_per_transition
+                                    .get(&silent_transition.id)
+                                    .unwrap();
+                                // todo consider filtering out forbidden firings
+                                base.entry(silent_transition.id)
+                                    .or_insert_with(|| vec![])
+                                    .extend(firable_combinations.iter().cloned());
+                            }
+                            Some(base)
+                        };
+                        (combination.clone(), forbidden_firings)
+                    })
+                    .collect();
+            }
+
+            filtered_forbidden_combinations
+                .iter()
+                .enumerate()
+                .map(|(index, combination)| return (combination.clone(), None))
+                .collect()
+        })
+    }
+
     #[inline(never)]
     fn generate_children<'a>(
         &mut self,
@@ -1550,6 +1967,9 @@ impl ModelCaseChecker {
         query_case: &'a CaseGraph,
         static_cost: f64,
     ) -> Vec<SearchNode> {
+        if (read_flag()) {
+            println!("Generating children");
+        }
         //let mut children = Vec::new();
 
         // only add tokens to initial places, if the node is the initial node or follows a add token action node
@@ -1675,500 +2095,123 @@ impl ModelCaseChecker {
 
         //
         let mut transition_enabled: HashMap<Uuid, bool> = HashMap::new();
-
-        let mut firing_combinations_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> =
-            HashMap::new();
-
-        let mut forbidden_firings_per_transition: HashMap<Uuid, Vec<Arc<Binding>>> = HashMap::new();
+        let mut silent_transitions_to_expand: Vec<SearchNode> = Vec::new();
 
         let mut transition_children: Vec<SearchNode> = Vec::new();
-        for transition in self.model.transitions.values() {
-            //println!("Transition: {}", transition.name);
-            let firing_combinations = node.marking.get_firing_combinations(transition);
-            if (firing_combinations.len() > 0) {
-                //println!("{}",transition.name);
-                //println!("Firing combinations: {:?}", firing_combinations.iter().map(|c| c.to_string()).collect::<Vec<String>>());
-            }
 
-            transition_enabled.insert(transition.id, firing_combinations.len() > 0);
-            let firing_combinations: Vec<Arc<Binding>> =
-                firing_combinations.into_iter().map(Arc::new).collect();
+        self.iterate_enabled_firings(&node.marking, &node.forbidden_firings)
+            .enumerate()
+            .for_each(|(index, (combination, forbidden_firings))| {
+                transition_enabled.insert(combination.transition_id, true);
+                let mut new_marking = node.marking.clone();
 
-            if (!transition.silent) {
-                forbidden_firings_per_transition
-                    .insert(transition.id, firing_combinations.iter().cloned().collect());
-            }
+                let transition = self
+                    .model
+                    .get_transition(&combination.transition_id)
+                    .unwrap();
+                new_marking.fire_transition(transition, &*combination);
+                //let mut new_partial_case_stats = node.partial_case.get_case_stats();
 
-            firing_combinations_per_transition.insert(transition.id, firing_combinations);
-        }
-
-        if let Some(forbidden_firings_previous) = &node.forbidden_firings {
-            // if this is the case, merge forbidden_firings_per_transition with forbidden_firings_previous
-            for (transition_id, forbidden_firings_to_extend) in forbidden_firings_previous {
-                let forbidden_firings = forbidden_firings_per_transition
-                    .entry(*transition_id)
-                    .or_insert_with(|| vec![]);
-                forbidden_firings.extend(forbidden_firings_to_extend.iter().cloned());
-            }
-        }
-
-        for transition in self.model.transitions.values() {
-            let firing_combinations = firing_combinations_per_transition
-                .get(&transition.id)
-                .unwrap();
-            if firing_combinations.is_empty() {
-                continue;
-            }
-
-            // Filter combinations based on symmetry breaking
-            let filtered_combinations = firing_combinations;
-            //self.filter_firing_combinations(&firing_combinations, transition, node);
-
-            if (filtered_combinations.is_empty()) {
-                panic!("No filtered combinations?!");
-            }
-
-            if (filtered_combinations.len() < firing_combinations.len()) {
-                //println!("Filtered out {} combinations", firing_combinations.len() - filtered_combinations.len());
-            }
-
-            // filter out forbidden firings, meaning filter out all bindings from filteredCombinations that are in searchNode.forbiddenFirings
-
-            let mut filtered_forbidden_combinations = match &node.forbidden_firings {
-                Some(forbidden_firings_per_t) => {
-                    let forbidden_firings = forbidden_firings_per_t.get(&transition.id);
-                    if (forbidden_firings.is_none()) {
-                        filtered_combinations.clone()
-                    } else {
-                        let forbidden_firings = forbidden_firings.unwrap();
-                        filtered_combinations
-                            .iter()
-                            .filter_map(|combination| {
-                                if (forbidden_firings.contains(combination)) {
-                                    return None;
-                                }
-                                return Some(combination);
-                            })
-                            .cloned()
-                            .collect()
-                    }
-                }
-                None => filtered_combinations.clone(),
-            };
-            let filtered_out_len =
-                filtered_combinations.len() - filtered_forbidden_combinations.len();
-            if (filtered_out_len > 0) {
-                //println!("Filtered out {} forbidden combinations", filtered_out_len);
-            }
-
-            if (transition.silent) {
-                filtered_forbidden_combinations.sort_by(|a, b| compare_bindings(a, b));
-            }
-
-            filtered_forbidden_combinations
-                .iter()
-                .enumerate()
-                .for_each(|(index, combination)| {
-                    let mut new_marking = node.marking.clone();
-                    let mut new_partial_case = node.partial_case.clone();
-
-                    let mut most_recent_event_id = node.most_recent_event_id.clone();
-
-                    new_marking.fire_transition(transition, combination);
-                    //let mut new_partial_case_stats = node.partial_case.get_case_stats();
-
-                    let mut new_action_path = node.action_path.clone();
-                    let new_action = Arc::new(SearchNodeAction::fire_transition(
-                        transition.id,
-                        combination.clone().clone(),
+                if (!transition.silent) {
+                    self.create_child_nodes(
+                        &node,
+                        query_case,
+                        &mut transition_children,
+                        &combination,
+                        &new_marking,
+                        transition,
+                    );
+                } else {
+                    let mut stack = Vec::new();
+                    stack.push((
+                        node.marking.is_final_has_tokens(),
+                        new_marking,
+                        combination,
+                        forbidden_firings,
                     ));
-                    new_action_path.push(new_action);
 
-                    if (!transition.silent) {
-                        let event_type: EventType = transition.event_type.clone().into();
-                        let event_id = new_partial_case.get_new_id();
-                        let new_event = Node::EventNode(Event {
-                            id: event_id,
-                            event_type: event_type.clone(),
-                        });
-                        new_partial_case.add_node(new_event);
-                        let mut collected_edges: Vec<Edge> = Vec::new();
-                        combination
-                            .object_binding_info
-                            .values()
-                            .for_each(|binding_info| {
-                                binding_info.tokens.iter().for_each(|token| {
-                                    let e20_edge_id = new_partial_case.get_new_id();
-                                    collected_edges.push(Edge::new(
-                                        e20_edge_id,
-                                        event_id,
-                                        self.token_graph_id_mapping.get(&token.id).unwrap().clone(),
-                                        EdgeType::E2O,
-                                    ));
-                                    // new_partial_case_stats
-                                    //     .query_edge_counts
-                                    //     .entry(EdgeType::E2O)
-                                    //     .and_modify(|e| *e += 1)
-                                    //     .or_insert(1);
-                                    //
-                                    // *new_partial_case_stats
-                                    //     .edge_type_counts
-                                    //     .entry((
-                                    //         EdgeType::E2O,
-                                    //         transition.event_type.into(),
-                                    //         binding_info.object_type.into(),
-                                    //     ))
-                                    //     .or_insert(0) += 1;
-                                })
-                            });
+                    while (!stack.is_empty()) {
+                        let (prev_final, marking, combination, forbidden_firings) =
+                            stack.pop().unwrap();
+                        let current_final = marking.is_final_has_tokens();
+                        self.iterate_enabled_firings(&marking, &forbidden_firings)
+                            .for_each(|(combination, forbidden_firings)| {
+                                let mut next_marking = marking.clone();
 
-                        let df_edge_id = new_partial_case.get_new_id();
-                        if let Some(prev_event_id) = node.most_recent_event_id {
-                            collected_edges.push(Edge::new(
-                                df_edge_id,
-                                prev_event_id,
-                                event_id,
-                                EdgeType::DF,
-                            ));
-                            // new_partial_case_stats
-                            //     .query_edge_counts
-                            //     .entry(EdgeType::DF)
-                            //     .and_modify(|e| *e += 1)
-                            //     .or_insert(1);
-                            //
-                            // let a = new_partial_case
-                            //     .get_node(prev_event_id)
-                            //     .unwrap()
-                            //     .oc_type_id();
-                            // let b = transition.event_type.into();
-                            //
-                            // *new_partial_case_stats
-                            //     .edge_type_counts
-                            //     .entry((EdgeType::DF, a, b))
-                            //     .or_insert(0) += 1;
-                        }
-
-                        // new_partial_case_stats
-                        //     .query_event_counts
-                        //     .entry(transition.event_type)
-                        //     .and_modify(|e| *e += 1)
-                        //     .or_insert(1);
-
-                        most_recent_event_id = Some(event_id);
-
-                        collected_edges.iter().for_each(|edge| {
-                            new_partial_case.add_edge(edge.clone());
-                        });
-
-                        // now there's the following options for a new search node: first, all open nodes matching the event cann be used as mapping
-                        // second, the new node here is not mapped to the query nodes
-                        node.open_query_nodes
-                            .iter()
-                            .filter(|node| {
-                                query_case.nodes.get(node).unwrap().oc_type_id() == event_type.0
-                            })
-                            .for_each(|open_node| {
-                                let mut new_open_node_list = node.open_query_nodes.clone();
-                                let mut new_reverse_node_mapping =
-                                    node.reverse_node_mapping.clone();
-                                let mut new_reverse_edge_mapping =
-                                    node.reverse_edge_mapping.clone();
-                                // remove open node, it is an element not an index
-                                new_open_node_list.retain(|n| n != open_node);
-
-                                // add new node to mapping
-                                new_reverse_node_mapping
-                                    .insert(event_id, RealNode(event_id, *open_node));
-
-                                let mut edges_hit: Vec<usize> = Vec::new();
-
-                                let mut void_edge_count = 0;
-                                // check which edges can be assigned and which edges cannot
-                                collected_edges.iter().for_each(|edge| {
-                                    // if both nodes are corresponding in the mapping, we add it as a realEdge, otherwise as a void Edge
-                                    // for that, we look at the node mapping for each node connected to the edge
-                                    let a = new_reverse_node_mapping.get(&edge.from).unwrap();
-                                    let b = new_reverse_node_mapping.get(&edge.to).unwrap();
-
-                                    if a.is_void() || b.is_void() {
-                                        new_reverse_edge_mapping
-                                            .insert(edge.id, VoidEdge(edge.id, edge.id));
-                                        void_edge_count += 1;
-                                    } else {
-                                        // now, we need to first identify the corresponding edge in the query case graph to make a mapping possible
-                                        // for that, we need to get the node ids of the edge
-
-                                        // there should at maximum be one edge between the two nodes
-                                        if let Some(query_edge) = query_case
-                                            .get_edge_between(a.target_id(), b.target_id())
-                                        {
-                                            new_reverse_edge_mapping
-                                                .insert(edge.id, RealEdge(edge.id, query_edge.id));
-                                            edges_hit.push(query_edge.id);
-                                        } else {
-                                            // Handle the case where the edge was not found
-                                            void_edge_count += 1;
-                                            new_reverse_edge_mapping
-                                                .insert(edge.id, VoidEdge(edge.id, edge.id));
-                                        }
-                                    }
-                                });
-
-                                let void_cost = query_case
-                                    .get_connected_edges(*open_node)
-                                    .unwrap()
-                                    .iter()
-                                    .map(|edge| query_case.get_edge(*edge).unwrap())
-                                    .filter(|edge| {
-                                        // edge is a df edge to the next node - we handle that in the next node coming
-                                        // fixme really? what if this is the very last node - then that should also cause cost, right?
-                                        if (edge.edge_type == EdgeType::DF  && edge.from == *open_node)
-                                        {
-                                            return false;
-                                        }
-                                        return !edges_hit.contains(&edge.id);
-                                    })
-                                    .count();
-
-                                let new_min_cost = node.static_min_cost
-                                    + void_edge_count as f64 + void_cost as f64;
-
-                                let min_remaining_cost = self.calculate_unreachable_events(
-                                    &new_marking,
-                                    &new_open_node_list,
-                                    query_case,
+                                next_marking.fire_transition(
+                                    self.model
+                                        .get_transition(&combination.transition_id)
+                                        .unwrap(),
+                                    &*combination,
                                 );
 
-                                if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
-                                    println!("Old lb {}", node.min_cost);
-                                    println!("New lb {}", new_min_cost + min_remaining_cost as f64);
-                                    println!("share of heuristic {}", min_remaining_cost);
-                                    println!(
-                                        "Old share of heuristic {}",
-                                        node.min_cost - node.static_min_cost
-                                    );
-                                    let cost_old = self.calculate_unreachable_events_verbose(
-                                        &node.marking,
-                                        &node.open_query_nodes,
+                                let transition = self
+                                    .model
+                                    .get_transition(&combination.transition_id)
+                                    .unwrap();
+                                
+                                if(transition.silent) {
+                                    stack.push((current_final, next_marking, combination, forbidden_firings));
+                                } else {
+                                    self.create_child_nodes(
+                                        &node,
                                         query_case,
+                                        &mut transition_children,
+                                        &combination,
+                                        &next_marking,
+                                        transition,
                                     );
-                                    let cost = self.calculate_unreachable_events_verbose(
-                                        &new_marking,
-                                        &new_open_node_list,
-                                        query_case,
-                                    );
-                                    println!("Cost {}", cost);
-                                    panic!("Lower bound decreased wtf1!")
                                 }
-
-                                transition_children.push(SearchNode::new_with_stats(
-                                    new_marking.clone(),
-                                    new_partial_case.clone(),
-                                    new_min_cost + min_remaining_cost as f64,
-                                    new_min_cost,
-                                    most_recent_event_id,
-                                    new_action_path.clone(),
-                                    None,
-                                    node.depth + 1,
-                                    new_open_node_list,
-                                    new_reverse_node_mapping,
-                                    new_reverse_edge_mapping,
-                                    None,
-                                    // node.epsilon_cost + void_edge_count as f64,
-                                    // node.void_cost + void_cost as f64,
-                                ));
+                                
+                                
                             });
 
-                        // now second
-                        {
-                            let mut new_reverse_node_mapping = node.reverse_node_mapping.clone();
-                            let mut new_reverse_edge_mapping = node.reverse_edge_mapping.clone();
-                            // remove open node, it is an element not an index
+                        if (!prev_final && current_final) {
+                            // in this case all further firings are forbidden to prevent symmetries
+                            let firing_combinations = self
+                                .model
+                                .transitions
+                                .values()
+                                .map(|transition| {
+                                    (
+                                        transition.id,
+                                        marking
+                                            .get_firing_combinations(transition)
+                                            .iter()
+                                            .map(|binding| Arc::new(binding.clone()))
+                                            .collect::<Vec<Arc<Binding>>>(),
+                                    )
+                                })
+                                .collect::<HashMap<Uuid, Vec<Arc<Binding>>>>();
 
-                            // add new node to mapping
-                            new_reverse_node_mapping.insert(event_id, VoidNode(event_id, event_id));
-                            collected_edges.iter().for_each(|edge| {
-                                new_reverse_edge_mapping
-                                    .insert(edge.id, VoidEdge(edge.id, edge.id));
-                            });
-
-                            let mut new_min_cost =
-                                node.static_min_cost + collected_edges.len() as f64 + 1.0;
                             let min_remaining_cost = self.calculate_unreachable_events(
-                                &new_marking,
+                                &marking,
                                 &node.open_query_nodes,
                                 query_case,
                             );
 
-                            if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
-                                println!("Old lb {}", node.min_cost);
-                                println!("New lb {}", new_min_cost + min_remaining_cost as f64);
-                                println!("share of heuristic {}", min_remaining_cost);
-                                println!(
-                                    "Old share of heuristic {}",
-                                    node.min_cost - node.static_min_cost
-                                );
-                                panic!("Lower bound decreased wtf2!")
-                            }
-
-                            transition_children.push(SearchNode::new_with_stats(
-                                new_marking,
-                                new_partial_case,
-                                new_min_cost + min_remaining_cost as f64,
-                                new_min_cost,
-                                most_recent_event_id,
-                                new_action_path,
+                            let silent_node = SearchNode::new_with_stats(
+                                marking,
+                                node.partial_case.clone(),
+                                node.static_min_cost + min_remaining_cost as f64,
+                                node.static_min_cost,
+                                node.most_recent_event_id,
+                                node.action_path.clone(),
                                 None,
                                 node.depth + 1,
                                 node.open_query_nodes.clone(),
-                                new_reverse_node_mapping,
-                                new_reverse_edge_mapping,
-                                None,
-                                // node.epsilon_cost + collected_edges.len() as f64 + 1.0,
-                                // node.void_cost +void_cost,
-                            ));
-                        }
-                    } else {
-                        let forbidden_firings = {
-                            let mut base = forbidden_firings_per_transition.clone();
-                            // add all combinations from index 0 to index to forbidden firings
-                            // select them from filtered_forbidden_combinations
-                            // -> symmetry-breaking
-                            let forbidden_firings =
-                                filtered_forbidden_combinations[..index].to_vec();
-                            if (!forbidden_firings.is_empty()) {
-                                base.entry(transition.id)
-                                    .or_insert_with(|| vec![])
-                                    .extend(forbidden_firings);
-                            }
-                            // now, also forbid all combinations from all silent transitions with a higher lexicographical order
-                            // which are also firable in this node
-                            // first, sort all silent transitions lexicograhically by name
-
-                            let mut sorted_silent_transitions: Vec<&Transition> = self
-                                .model
-                                .transitions
-                                .values()
-                                .filter(|t| t.silent)
-                                .collect();
-                            sorted_silent_transitions.sort_by(|a, b| a.id.cmp(&b.id));
-
-                            // now, iterate over all silent transitions with a higher lexicographical order
-                            // and add all firable combinations to the forbidden firings
-                            for silent_transition in sorted_silent_transitions {
-                                if (silent_transition.id <= transition.id) {
-                                    continue;
-                                }
-                                let firable_combinations = firing_combinations_per_transition
-                                    .get(&silent_transition.id)
-                                    .unwrap();
-                                // todo consider filtering out forbidden firings
-                                base.entry(silent_transition.id)
-                                    .or_insert_with(|| vec![])
-                                    .extend(firable_combinations.iter().cloned());
-                            }
-
-                            Some(base)
-                        };
-
-                        let min_remaining_cost = self.calculate_unreachable_events(
-                            &new_marking,
-                            &node.open_query_nodes,
-                            query_case,
-                        );
-
-                        if (node.min_cost > node.static_min_cost + min_remaining_cost as f64) {
-                            println!("Old lb {}", node.min_cost);
-                            println!(
-                                "New lb {}",
-                                node.static_min_cost + min_remaining_cost as f64
+                                node.reverse_node_mapping.clone(),
+                                node.reverse_edge_mapping.clone(),
+                                Some(firing_combinations),
+                                node.epsilon_cost,
+                                node.void_cost,
                             );
-                            println!("share of heuristic {}", min_remaining_cost);
-                            println!(
-                                "Old share of heuristic {}",
-                                node.min_cost - node.static_min_cost
-                            );
-                            panic!("Lower bound decreased wtf3!")
+                            transition_children.push(silent_node)
                         }
-
-                        transition_children.push(SearchNode::new_with_stats(
-                            new_marking,
-                            new_partial_case,
-                            node.static_min_cost + min_remaining_cost as f64,
-                            node.static_min_cost,
-                            most_recent_event_id,
-                            new_action_path,
-                            None,
-                            node.depth + 1,
-                            node.open_query_nodes.clone(),
-                            node.reverse_node_mapping.clone(),
-                            node.reverse_edge_mapping.clone(),
-                            forbidden_firings,
-                            // node.epsilon_cost,
-                            // node.void_cost
-                        ));
                     }
+                }
+            });
 
-                    /*let new_cost = self.calculate_min_cost(
-                        &query_case_stats,
-                        &new_partial_case_stats,
-                        static_cost,
-                        &new_marking,
-                    );*/
-                    // fixme
-                    /*
-                    let new_cost = 99999999.0;
-                    if (new_cost < node.min_cost) {
-                        println!("!!!!! COST DECREASED by {} WTF", node.min_cost - new_cost);
-                        self.more_epsilon_than_void_with_debug(&node.marking);
-                        for ((edge_type, a, b), &partial_count) in
-                            &node.partial_case_stats.edge_type_counts
-                        {
-                            if edge_type.ne(&EdgeType::E2O) {
-                                continue;
-                            }
-                            let query_count = query_case_stats
-                                .edge_type_counts
-                                .get(&(*edge_type, *a, *b))
-                                .unwrap_or(&0);
-                            let type_storage = TYPE_STORAGE.read().unwrap();
-                            println!(
-                                "Edge: ({:?},{},{}) Difference: {}",
-                                edge_type,
-                                type_storage.get_type_name(*a).unwrap(),
-                                type_storage.get_type_name(*b).unwrap(),
-                                (partial_count as f64 - *query_count as f64)
-                            );
-                        }
-                        println!("-----------------");
-                        println!("After firing transition: {}", transition.name);
-                        for ((edge_type, a, b), &partial_count) in
-                            &new_partial_case_stats.edge_type_counts
-                        {
-                            if edge_type.ne(&EdgeType::E2O) {
-                                continue;
-                            }
-                            let query_count = query_case_stats
-                                .edge_type_counts
-                                .get(&(*edge_type, *a, *b))
-                                .unwrap_or(&0);
-                            let type_storage = TYPE_STORAGE.read().unwrap();
-                            println!(
-                                "Edge: ({:?},{},{}) Difference: {}",
-                                edge_type,
-                                type_storage.get_type_name(*a).unwrap(),
-                                type_storage.get_type_name(*b).unwrap(),
-                                (partial_count as f64 - *query_count as f64)
-                            );
-                        }
-                        self.more_epsilon_than_void_with_debug(&new_marking);
-                        println!("-----------------");
-                        query_case_stats.pretty_print_stats()
-                    }*/
-                });
-        }
-        //println!("done getting transitions");
-        // places are allowed to be dead as long as we keep adding tokens to alive them ;)
         if (!node.action_path.last().unwrap().is_pre_firing()) {
             if !node
                 .marking
@@ -2179,7 +2222,7 @@ impl ModelCaseChecker {
                 let dead_places = node
                     .marking
                     .has_dead_places(&transition_enabled, &self.reachability_cache);
-
+                /*
                 dead_places.iter().for_each(|place_id| {
                     println!(
                         "Dead place: {}",
@@ -2190,47 +2233,230 @@ impl ModelCaseChecker {
                             .clone()
                             .unwrap_or("no_name".to_string())
                     );
-                });
+                });*/
 
                 return vec![];
             }
         }
-        //println!("done checking dead");
 
-        // sort the transitions by the difference between case stats and query case stats
-        /*transition_children.sort_by(|a, b| {
-            // prioritize transitions that have a higher difference between the case stats and the query case stats
-            // all actions in this list are transitions
-            let transition_a = a.action_path.last().unwrap().transition_id().unwrap();
-
-            let transition_type = &self.model.get_transition(&transition_a).unwrap().event_type;
-
-            let difference_a = *query_case_stats
-                .query_event_counts
-                .get(transition_type)
-                .unwrap_or(&0) as i64
-                - *a.partial_case_stats
-                    .query_event_counts
-                    .get(transition_type)
-                    .unwrap_or(&0) as i64;
-
-            let transition_b = b.action_path.last().unwrap().transition_id().unwrap();
-            let transition_type = &self.model.get_transition(&transition_b).unwrap().event_type;
-
-            let difference_b = *query_case_stats
-                .query_event_counts
-                .get(transition_type)
-                .unwrap_or(&0) as i64
-                - *b.partial_case_stats
-                    .query_event_counts
-                    .get(transition_type)
-                    .unwrap_or(&0) as i64;
-
-            difference_a.partial_cmp(&difference_b).unwrap()
-        });*/
         return transition_children;
         //children.append(&mut transition_children);
         //children
+    }
+
+    fn create_child_nodes(
+        &self,
+        node: &&SearchNode,
+        query_case: &CaseGraph,
+        mut transition_children: &mut Vec<SearchNode>,
+        combination: &Arc<Binding>,
+        new_marking: &Marking,
+        transition: &Transition,
+    ) {
+        let mut most_recent_event_id = node.most_recent_event_id.clone();
+        let mut new_partial_case = node.partial_case.clone();
+
+        let mut new_action_path = node.action_path.clone();
+        let new_action = Arc::new(SearchNodeAction::fire_transition(
+            transition.id,
+            combination.clone().clone(),
+        ));
+        new_action_path.push(new_action);
+        let event_type: EventType = transition.event_type.clone().into();
+        let event_id = new_partial_case.get_new_id();
+        let new_event = Node::EventNode(Event {
+            id: event_id,
+            event_type: event_type.clone(),
+        });
+        new_partial_case.add_node(new_event);
+        let mut collected_edges: Vec<Edge> = Vec::new();
+        combination
+            .object_binding_info
+            .values()
+            .for_each(|binding_info| {
+                binding_info.tokens.iter().for_each(|token| {
+                    let e20_edge_id = new_partial_case.get_new_id();
+                    collected_edges.push(Edge::new(
+                        e20_edge_id,
+                        event_id,
+                        self.token_graph_id_mapping.get(&token.id).unwrap().clone(),
+                        EdgeType::E2O,
+                    ));
+                })
+            });
+
+        let df_edge_id = new_partial_case.get_new_id();
+        if let Some(prev_event_id) = node.most_recent_event_id {
+            collected_edges.push(Edge::new(df_edge_id, prev_event_id, event_id, EdgeType::DF));
+        }
+
+        most_recent_event_id = Some(event_id);
+
+        collected_edges.iter().for_each(|edge| {
+            new_partial_case.add_edge(edge.clone());
+        });
+
+        // now there's the following options for a new search node: first, all open nodes matching the event cann be used as mapping
+        // second, the new node here is not mapped to the query nodes
+        node.open_query_nodes
+            .iter()
+            .filter(|node| query_case.nodes.get(node).unwrap().oc_type_id() == event_type.0)
+            .for_each(|open_node| {
+                let mut new_open_node_list = node.open_query_nodes.clone();
+                let mut new_reverse_node_mapping = node.reverse_node_mapping.clone();
+                let mut new_reverse_edge_mapping = node.reverse_edge_mapping.clone();
+                // remove open node, it is an element not an index
+                new_open_node_list.retain(|n| n != open_node);
+
+                // add new node to mapping
+                new_reverse_node_mapping.insert(event_id, RealNode(event_id, *open_node));
+
+                let mut edges_hit: Vec<usize> = Vec::new();
+
+                let mut void_edge_count = 0;
+                // check which edges can be assigned and which edges cannot
+                collected_edges.iter().for_each(|edge| {
+                    // if both nodes are corresponding in the mapping, we add it as a realEdge, otherwise as a void Edge
+                    // for that, we look at the node mapping for each node connected to the edge
+                    let a = new_reverse_node_mapping.get(&edge.from).unwrap();
+                    let b = new_reverse_node_mapping.get(&edge.to).unwrap();
+
+                    if a.is_void() || b.is_void() {
+                        new_reverse_edge_mapping.insert(edge.id, VoidEdge(edge.id, edge.id));
+                        void_edge_count += 1;
+                    } else {
+                        // now, we need to first identify the corresponding edge in the query case graph to make a mapping possible
+                        // for that, we need to get the node ids of the edge
+
+                        // there should at maximum be one edge between the two nodes
+                        if let Some(query_edge) =
+                            query_case.get_edge_between(a.target_id(), b.target_id())
+                        {
+                            new_reverse_edge_mapping
+                                .insert(edge.id, RealEdge(edge.id, query_edge.id));
+                            edges_hit.push(query_edge.id);
+                        } else {
+                            // Handle the case where the edge was not found
+                            void_edge_count += 1;
+                            new_reverse_edge_mapping.insert(edge.id, VoidEdge(edge.id, edge.id));
+                        }
+                    }
+                });
+
+                let void_cost = query_case
+                    .get_connected_edges(*open_node)
+                    .unwrap()
+                    .iter()
+                    .map(|edge| query_case.get_edge(*edge).unwrap())
+                    .filter(|edge| {
+                        // edge is a df edge to the next node - we handle that in the next node coming
+                        // fixme really? what if this is the very last node - then that should also cause cost, right?
+                        if (edge.edge_type == EdgeType::DF && edge.from == *open_node) {
+                            return false;
+                        }
+                        return !edges_hit.contains(&edge.id);
+                    })
+                    .count();
+
+                let new_min_cost = node.static_min_cost + void_edge_count as f64 + void_cost as f64;
+
+                let min_remaining_cost = self.calculate_unreachable_events(
+                    &new_marking,
+                    &new_open_node_list,
+                    query_case,
+                );
+
+                if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
+                    println!("Old lb {}", node.min_cost);
+                    println!("New lb {}", new_min_cost + min_remaining_cost as f64);
+                    println!("share of heuristic {}", min_remaining_cost);
+                    println!(
+                        "Old share of heuristic {}",
+                        node.min_cost - node.static_min_cost
+                    );
+                    let cost_old = self.calculate_unreachable_events_verbose(
+                        &node.marking,
+                        &node.open_query_nodes,
+                        query_case,
+                    );
+                    let cost = self.calculate_unreachable_events_verbose(
+                        &new_marking,
+                        &new_open_node_list,
+                        query_case,
+                    );
+                    println!("Cost {}", cost);
+                    panic!("Lower bound decreased wtf1!")
+                }
+
+                if (read_flag()) {
+                    println!("{}Adding new node to mappinga", transition.name);
+                }
+
+                transition_children.push(SearchNode::new_with_stats(
+                    new_marking.clone(),
+                    new_partial_case.clone(),
+                    new_min_cost + min_remaining_cost as f64,
+                    new_min_cost,
+                    most_recent_event_id,
+                    new_action_path.clone(),
+                    None,
+                    node.depth + 1,
+                    new_open_node_list,
+                    new_reverse_node_mapping,
+                    new_reverse_edge_mapping,
+                    None,
+                    node.epsilon_cost + void_edge_count as f64,
+                    node.void_cost + void_cost as f64,
+                ));
+            });
+
+        // now second
+        {
+            if (read_flag()) {
+                println!("{}Adding new node to mappingb", transition.name);
+            }
+            let mut new_reverse_node_mapping = node.reverse_node_mapping.clone();
+            let mut new_reverse_edge_mapping = node.reverse_edge_mapping.clone();
+            // remove open node, it is an element not an index
+
+            // add new node to mapping
+            new_reverse_node_mapping.insert(event_id, VoidNode(event_id, event_id));
+            collected_edges.iter().for_each(|edge| {
+                new_reverse_edge_mapping.insert(edge.id, VoidEdge(edge.id, edge.id));
+            });
+
+            let mut new_min_cost = node.static_min_cost + collected_edges.len() as f64 + 1.0;
+            let min_remaining_cost =
+                self.calculate_unreachable_events(&new_marking, &node.open_query_nodes, query_case);
+
+            if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
+                println!("Old lb {}", node.min_cost);
+                println!("New lb {}", new_min_cost + min_remaining_cost as f64);
+                println!("share of heuristic {}", min_remaining_cost);
+                println!(
+                    "Old share of heuristic {}",
+                    node.min_cost - node.static_min_cost
+                );
+                panic!("Lower bound decreased wtf2!")
+            }
+
+            transition_children.push(SearchNode::new_with_stats(
+                new_marking.clone(),
+                new_partial_case,
+                new_min_cost + min_remaining_cost as f64,
+                new_min_cost,
+                most_recent_event_id,
+                new_action_path,
+                None,
+                node.depth + 1,
+                node.open_query_nodes.clone(),
+                new_reverse_node_mapping,
+                new_reverse_edge_mapping,
+                None,
+                node.epsilon_cost + collected_edges.len() as f64 + 1.0,
+                node.void_cost,
+            ));
+        }
     }
 }
 fn compare_bindings(a: &Arc<Binding>, b: &Arc<Binding>) -> Ordering {
@@ -2416,7 +2642,7 @@ mod tests {
                 )
                     .unwrap();*/
 
-                let result = checker.bnb_v2(&case_graph, initial_marking.clone());
+                let result = checker.bnb_v3(&case_graph, initial_marking.clone());
                 if let Some(result_node) = result {
                     println!("Solution found for case {:?}", path);
                     // save the alignment result as an image in a directory next to /Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/varsbpi
