@@ -268,7 +268,7 @@ pub struct ModelCaseChecker {
     token_graph_id_mapping: HashMap<usize, usize>,
     reachability_cache: ReachabilityCache,
     shortest_path_cache: ShortestPathCache,
-    min_events_per_object: HashMap<ObjectType, HashSet<(EventType, bool)>>,
+    min_events_per_object: HashMap<ObjectType, HashSet<(EventType, bool, bool)>>,
     model: Arc<ObjectCentricPetriNet>,
     shortest_case: Option<CaseGraph>,
     model_transitions: HashSet<String>,
@@ -336,6 +336,8 @@ impl ModelCaseChecker {
         stack.push(root_node);
 
         while let Some(node) = stack.pop() {
+            //print!("->{}/C{}",node.depth, node.min_cost);
+            //node.action_path.last()?.log(self.model.clone());
             counter += 1;
             if node.min_cost >= global_upper_bound {
                 continue;
@@ -1329,6 +1331,7 @@ impl ModelCaseChecker {
             //println!("Successfully added {} remaining cost", cost)
         }
         let mut more_epsilon_cost = 0;
+        // none query nodes are open or none are reachable anymore
         if (cost_list.len() == open_query_nodes.len()) {
             // remaining cost
             //println!("Adding remaining cost!");
@@ -1355,7 +1358,21 @@ impl ModelCaseChecker {
                     more_epsilon_cost += (shortest_path * count.len());
                 });
             if(unhit_expected_cost.len()> more_epsilon_cost) {
-                panic!("This should not happen")
+                println!("=========================");
+                unhit_expected_cost.iter().for_each(|uhe| {
+                    println!("Event: {}; Object: {}; Cost: {}", uhe.event_type.to_string(), uhe.partial_object_id.to_string(), uhe.expected_cost.to_string())
+                });
+                marking.assignments.iter().for_each(|(pid, bag)| {
+                    if(bag.is_empty()) {
+                        return ;
+                    }
+
+                    let place = self.model.get_place(pid).unwrap();
+                    let tokens_as_string = bag.iter().map(|token| self.token_graph_id_mapping.get(&token.id).unwrap().to_string()).collect::<Vec<String>>().join(",");
+
+                    println!("Place {} - {}; Tokens: {}", &place.name.clone().unwrap(), place.object_type.clone(), tokens_as_string);
+                });
+                panic!("This should not happen - unhit > epsilon")
             }
             //TODO make remaining cost as accurate as unhit expected count (2,1)
             more_epsilon_cost-unhit_expected_cost.len();
@@ -1671,6 +1688,7 @@ impl ModelCaseChecker {
         })
     }
 
+    /// This heuristic only works for case graphs where all events have at least 1 e2o edge
     fn calculate_min_expected_cost(
         &self,
         query_case: &CaseGraph,
@@ -1678,9 +1696,15 @@ impl ModelCaseChecker {
         reverse_node_mapping: &HashMap<usize, NodeMapping>,
         unhit_expected_cost: &mut Vec<UnhitExpectedCost>,
     ) {
+
         fn projected_cost(tf: &bool) -> usize {
             if (*tf) {
-                // event involves only one object - cost of node + cost of E2O edge
+                // event involves only one object
+                // Case 1: Event Node is directly void mapped in reverse mapping
+                // -> cost of node + cost of E2O edge
+                // Case 2: Event Node is mapped to another node in mapping
+                // The other node has outgoing edges, which will not match this one
+                // -> cost of e2o edge + cost of replacing the outgoing e2o edge
                 return 2;
             } else {
                 // event involves multiple objects - only cost of E2O edge
@@ -1721,7 +1745,7 @@ impl ModelCaseChecker {
 
                         min_events
                             .iter()
-                            .filter(|(ev, _)| {
+                            .filter(|(ev, _, _)| {
                                 return !object_adjacency
                                     .iter()
                                     .any(|node| node.oc_type_id() == ev.0);
@@ -1733,8 +1757,12 @@ impl ModelCaseChecker {
             })
             .unwrap()
             .iter()
-            .for_each(|(ev, tf)| {
-                let cost = projected_cost(tf);
+            .for_each(|(ev, tf, can_add_edge)| {
+                let mut cost = projected_cost(tf);
+
+                /*if *can_add_edge {
+                    cost +=1;
+                }*/
                 unhit_expected_cost.push(UnhitExpectedCost {
                     event_type: ev.clone(),
                     partial_object_id: object_node.id(),
@@ -2149,17 +2177,52 @@ impl ModelCaseChecker {
 
                 let new_min_cost = node.static_min_cost + void_edge_count as f64 + void_cost as f64;
 
+
+                let mut removed_pos : Vec<usize> = Vec::new();
+
+                let mut new_unhit_expectecd_cost = node.unhit_expected_cost.clone();
+                collected_edges.iter().for_each(|edge|{
+                    if(edge.edge_type != EdgeType::E2O) {
+                        return;
+                    }
+                    // only void mappings contribute to unhit expected cost
+                    if(!new_reverse_edge_mapping.get(&edge.id).unwrap().is_void()) {
+                        return;
+                    }
+
+                    if let Some(pos) = new_unhit_expectecd_cost.iter().position(|unhit_expected_cost| {
+                        return unhit_expected_cost.partial_object_id == edge.to && unhit_expected_cost.event_type == event_type;
+                    }) {
+                        removed_pos.push(pos.clone());
+                        new_unhit_expectecd_cost.swap_remove(pos);
+                    }
+                });
+
                 let min_remaining_cost = self.calculate_unreachable_events(
                     &new_marking,
                     &new_open_node_list,
                     query_case,
-                    &node.unhit_expected_cost
+                    &new_unhit_expectecd_cost
                 );
 
                 if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
+                    // calculate diff between new_unhit_ex
+                    removed_pos.iter().map(|pos| {
+                        node.unhit_expected_cost.get(*pos).unwrap()
+                    }).for_each(|uhe|{
+
+                    let token_id = self.token_graph_id_mapping.iter().find(|(k,v)| {**v == uhe.partial_object_id}).unwrap().0;
+                    println!("Event: {}; Object: {}; Cost: {}", uhe.event_type.to_string(), uhe.partial_object_id.to_string(), uhe.expected_cost.to_string());
+                    println!("Event: {}; Object: {}; Cost: {}", uhe.event_type.to_string(), token_id, uhe.expected_cost.to_string());
+                    });
+
+                    println!("Firing Transition {}", transition.name.clone());
+                    new_action_path.last().unwrap().log(self.model.clone());
                     println!("Old lb {}", node.min_cost);
                     println!("New lb {}", new_min_cost + min_remaining_cost as f64);
                     println!("share of heuristic {}", min_remaining_cost);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    println!("Slept for 1 second");
                     panic!("Lower bound decreased wtf1!")
                 }
 
@@ -2179,7 +2242,7 @@ impl ModelCaseChecker {
                     new_open_node_list,
                     new_reverse_node_mapping,
                     new_reverse_edge_mapping,
-                    node.unhit_expected_cost.clone(),
+                    new_unhit_expectecd_cost,
                     None,
                     node.epsilon_cost + void_edge_count as f64,
                     node.void_cost + void_cost as f64,
@@ -2205,7 +2268,7 @@ impl ModelCaseChecker {
 
             let mut new_unhit_expectecd_cost = node.unhit_expected_cost.clone();
             collected_edges.iter().for_each(|edge|{
-                if(edge.edge_type == EdgeType::DF) {
+                if(edge.edge_type != EdgeType::E2O) {
                     return;
                 }
 

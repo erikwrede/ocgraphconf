@@ -1,5 +1,5 @@
 // File: process_mining/src/oc_align/heuristic_transition_lower_bound.rs
-use crate::oc_petri_net::oc_petri_net::ObjectCentricPetriNet;
+use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Place};
 use crate::type_storage::{EventType, ObjectType};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -7,9 +7,11 @@ use uuid::Uuid;
 /// Computes a lower bound of transitions (by intersection)
 /// that are hit on every acyclic path (i.e. “must‐occur” events)
 /// for each object type.
+/// first bool: true if is solo event - can be estimated with cost 2
+/// second bool: true if can not be first event (none of the places are initial) - can be estimated with cost 2
 pub fn compute_must_transitions(
     net: &ObjectCentricPetriNet,
-) -> HashMap<ObjectType, HashSet<(EventType, bool)>> {
+) -> HashMap<ObjectType, HashSet<(EventType, bool, bool)>> {
     // mapping: object type -> vector of transition sets from each complete path
     let mut paths_by_type: HashMap<ObjectType, Vec<HashSet<Uuid>>> = HashMap::new();
 
@@ -31,7 +33,7 @@ pub fn compute_must_transitions(
     }
 
     // Compute the intersection over all path sets per object type.
-    let mut result: HashMap<ObjectType, HashSet<(EventType,bool)>> = HashMap::new();
+    let mut result: HashMap<ObjectType, HashSet<(EventType,bool, bool)>> = HashMap::new();
     for (obj_type, path_sets) in paths_by_type {
         if let Some(first_set) = path_sets.first() {
             let mut inter = first_set.clone();
@@ -43,14 +45,19 @@ pub fn compute_must_transitions(
                 .iter()
                 .map(|t| {
                     let transition = net.get_transition(t).unwrap();
-                    let solo_transition = 
+                    let input_places : Vec<&Place> = transition.input_arcs.iter().map(|arc|
+                        net.get_place(&arc.source_place_id).unwrap()
+                    ).collect();
+                    let solo_transition =
                         transition.input_arcs.iter().any(|arc| {
                             let place = net.get_place(&arc.source_place_id).unwrap();
                             place.oc_object_type != obj_type || arc.variable
                         });
+                    let can_be_first_event = input_places.iter().all(|place| place.initial);
                     (
                         transition.event_type.clone(),
                         !solo_transition,
+                        !can_be_first_event
                     )
                 })
                 .collect();
@@ -148,15 +155,15 @@ mod tests {
         let et_create_application: EventType = "Create application".into();
         let et_validate: EventType = "Validate".into();
         let et_accept: EventType = "Accept".into();
-        
+
         assert_eq!(
             transitions.get(&ot_offer).unwrap(),
-            &HashSet::from([(et_create_offer, false), (et_send,true)])
+            &HashSet::from([(et_create_offer, false, true ), (et_send,true, true)])
         );
-        
+
         assert_eq!(
             transitions.get(&ot_application).unwrap(),
-            &HashSet::from([(et_create_application, true), (et_validate, true), (et_accept, true)])
+            &HashSet::from([(et_create_application, true, false), (et_validate, true, true), (et_accept, true, true)])
         );
     }
 }
