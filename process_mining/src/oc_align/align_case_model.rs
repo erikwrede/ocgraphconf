@@ -6,9 +6,11 @@ use crate::oc_align::util::shortest_path_cache::ShortestPathCache;
 use crate::oc_align::visualization::case_visual::export_c2_with_alignment_image;
 use crate::oc_case::case::{CaseGraph, CaseStats, Edge, EdgeType, Event, Node, Object};
 use crate::oc_case::visualization::export_case_graph_image;
+use crate::oc_petri_net::heuristics::compute_must_transitions;
 use crate::oc_petri_net::marking::{Binding, Marking, OCToken};
 use crate::oc_petri_net::oc_petri_net::{ObjectCentricPetriNet, Transition};
 use crate::type_storage::{EventType, ObjectType, TYPE_STORAGE};
+use graphviz_rust::attributes::shape::circle;
 use graphviz_rust::cmd::Format;
 use parking_lot::Mutex;
 use peak_alloc::PeakAlloc;
@@ -17,9 +19,9 @@ use std::cmp::{Ordering, PartialEq};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::{Add, Deref, Not};
+use std::path::Iter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use graphviz_rust::attributes::shape::circle;
 use uuid::Uuid;
 
 #[global_allocator]
@@ -38,7 +40,7 @@ pub struct SearchNode {
     open_query_nodes: Vec<usize>, // FIXME dont use hashmap
     reverse_node_mapping: HashMap<usize, NodeMapping>, // cp_node_id -> query case mapping
     reverse_edge_mapping: HashMap<usize, EdgeMapping>, // cp_edge_id -> query case mapping
-
+    unhit_expected_cost: Vec<UnhitExpectedCost>,
     depth: usize,
 }
 
@@ -91,6 +93,7 @@ impl SearchNode {
         open_query_nodes: Vec<usize>,
         reverse_node_mapping: HashMap<usize, NodeMapping>,
         reverse_edge_mapping: HashMap<usize, EdgeMapping>,
+        unhit_expected_cost: Vec<UnhitExpectedCost>,
         action: Vec<Arc<SearchNodeAction>>,
     ) -> Self {
         SearchNode {
@@ -108,6 +111,7 @@ impl SearchNode {
             open_query_nodes,
             reverse_node_mapping,
             reverse_edge_mapping,
+            unhit_expected_cost,
         }
     }
 
@@ -124,6 +128,7 @@ impl SearchNode {
         open_query_nodes: Vec<usize>,
         reverse_node_mapping: HashMap<usize, NodeMapping>,
         reverse_edge_mapping: HashMap<usize, EdgeMapping>,
+        unhit_expected_cost: Vec<UnhitExpectedCost>,
         forbidden_firings: Option<HashMap<Uuid, Vec<Arc<Binding>>>>,
         epsilon_cost: f64,
         void_cost: f64,
@@ -143,6 +148,7 @@ impl SearchNode {
             reverse_edge_mapping,
             epsilon_cost,
             void_cost,
+            unhit_expected_cost,
         }
     }
 
@@ -251,10 +257,18 @@ impl SearchNodeAction {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UnhitExpectedCost {
+    partial_object_id: usize,
+    event_type: EventType,
+    expected_cost: usize,
+}
+
 pub struct ModelCaseChecker {
     token_graph_id_mapping: HashMap<usize, usize>,
     reachability_cache: ReachabilityCache,
     shortest_path_cache: ShortestPathCache,
+    min_events_per_object: HashMap<ObjectType, HashSet<(EventType, bool)>>,
     model: Arc<ObjectCentricPetriNet>,
     shortest_case: Option<CaseGraph>,
     model_transitions: HashSet<String>,
@@ -267,6 +281,7 @@ fn read_flag() -> bool {
 fn write_flag(val: bool) {
     *TRACE_GEN_CHILDREN.lock() = val;
 }
+
 impl ModelCaseChecker {
     pub fn new(model: Arc<ObjectCentricPetriNet>) -> Self {
         ModelCaseChecker {
@@ -274,6 +289,7 @@ impl ModelCaseChecker {
             reachability_cache: ReachabilityCache::new(model.clone()),
             shortest_path_cache: ShortestPathCache::new(model.clone()),
             model_transitions: model.transitions.values().map(|t| t.name.clone()).collect(),
+            min_events_per_object: compute_must_transitions(&*model),
             model,
             shortest_case: None,
         }
@@ -288,6 +304,7 @@ impl ModelCaseChecker {
             reachability_cache: ReachabilityCache::new(model.clone()),
             model_transitions: model.transitions.values().map(|t| t.name.clone()).collect(),
             shortest_path_cache: ShortestPathCache::new(model.clone()),
+            min_events_per_object: compute_must_transitions(&*model),
             model,
             shortest_case: Some(shortest_case),
         }
@@ -334,6 +351,7 @@ impl ModelCaseChecker {
                 );
                 println!("Current node min cost: {}", node.min_cost);
                 println!("Global upper bound: {}", global_upper_bound);
+                println!("Current node unhit expected cost: {}", node.unhit_expected_cost.iter().map(|c| c.expected_cost).sum::<usize>());
                 let current_mem = PEAK_ALLOC.current_usage_as_mb();
                 println!("This program currently uses {} MB of RAM.", current_mem);
                 let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
@@ -342,6 +360,9 @@ impl ModelCaseChecker {
             }
             // Check if node is accepting and update upper bound if needed.
             if node.marking.is_final_has_tokens() {
+                if( node.unhit_expected_cost.iter().map(|c| c.expected_cost).sum::<usize>() > 0 ) {
+                    panic!("Expected cost should be 0 here")
+                }
                 let alignment = CaseAlignment::align_mip(query_case, &node.partial_case);
                 let cost = alignment.total_cost().unwrap();
                 if cost < global_upper_bound {
@@ -793,8 +814,9 @@ impl ModelCaseChecker {
             .map(|p| p.oc_object_type.clone())
             .collect();
 
+        let mut unhit_expected_cost : Vec<UnhitExpectedCost> = Vec::new();
         // Initialize marking and case from query_case_stats, only for initial places
-        &query_case
+        let _ = &query_case
             .nodes
             .values()
             .filter(|node| node.is_object())
@@ -815,18 +837,22 @@ impl ModelCaseChecker {
                     let token_ids = new_marking.add_initial_token_count(&place.id, 1);
                     // Create a new object node and add it to the case graph
                     let object_id = new_partial_case.get_new_id();
+
                     let new_object = Node::ObjectNode(Object {
                         id: object_id.clone(),
                         object_type: object_type.clone(),
                     });
                     reverse_node_mapping
                         .insert(new_object.id(), RealNode(new_object.id(), node.id()));
+                    self.calculate_min_expected_cost(query_case, &new_object,  &reverse_node_mapping, &mut unhit_expected_cost);
                     new_partial_case.add_node(new_object);
-
                     // Map the token to object id
                     self.token_graph_id_mapping.insert(token_ids[0], object_id);
                 }
             });
+
+
+
         let open_node_list: Vec<_> = query_case
             .nodes
             .values()
@@ -834,6 +860,7 @@ impl ModelCaseChecker {
             .map(|node| node.id())
             .collect();
         println!("Open node list length {}", open_node_list.len());
+        println!("Initial unhit expected cost {}", unhit_expected_cost.iter().map(|f| f.expected_cost).sum::<usize>());
         // Create and return the initialized SearchNode
         SearchNode::new(
             new_marking,
@@ -849,6 +876,7 @@ impl ModelCaseChecker {
                 .collect(),
             reverse_node_mapping,
             HashMap::new(),
+            unhit_expected_cost,
             vec![Arc::new(SearchNodeAction::VOID)],
         )
     }
@@ -895,6 +923,7 @@ impl ModelCaseChecker {
                 vec![],
                 HashMap::new(),
                 HashMap::new(),
+                vec![],
                 vec![Arc::new(SearchNodeAction::VOID)],
             ));
         }
@@ -1222,6 +1251,7 @@ impl ModelCaseChecker {
         marking: &Marking,
         open_query_nodes: &Vec<usize>,
         query_case: &CaseGraph,
+        unhit_expected_cost: &Vec<UnhitExpectedCost>
     ) -> usize {
         let cost_list: Vec<usize> = open_query_nodes
             .iter()
@@ -1324,335 +1354,16 @@ impl ModelCaseChecker {
                         .distance;
                     more_epsilon_cost += (shortest_path * count.len());
                 });
-            //
-        }
-
-        return cost + more_epsilon_cost;
-    }
-
-    fn calculate_unreachable_events_verbose(
-        &self,
-        marking: &Marking,
-        open_query_nodes: &Vec<usize>,
-        query_case: &CaseGraph,
-    ) -> usize {
-        let cost_list: Vec<usize> = open_query_nodes
-            .iter()
-            .map(|node_id| {
-                let node: &Node = query_case.nodes.get(node_id).unwrap();
-                let node_cost = query_case.adjacency.get(node_id).unwrap().len() + 1;
-                let node_transition = self
-                    .model
-                    .transitions
-                    .values()
-                    .find(|t| t.event_type.0 == node.oc_type_id());
-                if (node_transition.is_none()) {
-                    println!(
-                        "Couldnt find transition for event type: {}",
-                        node.type_name()
-                    );
-                    return node_cost;
-                }
-                // get all input places to b and their object types
-                let input_places = node_transition
-                    .unwrap()
-                    .input_arcs
-                    .iter()
-                    .map(|arc| arc.source_place_id)
-                    .collect::<Vec<_>>();
-                let mut b_input_object_types = input_places
-                    .iter()
-                    .map(|place_id| {
-                        (
-                            (place_id.clone()/*,
-                            self.model
-                                .get_place(place_id)
-                                .unwrap()
-                                .oc_object_type
-                                .clone(),*/),
-                            false,
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
-
-                // check b reachable from any place with a token using reachability cache
-                marking
-                    .assignments
-                    .iter()
-                    .filter(|(place_id, tokens)| tokens.len() > 0)
-                    .for_each(|(place_id, tokens)| {
-                        for (place_id_b) in &input_places {
-                            if self.reachability_cache.is_reachable(place_id, place_id_b) {
-                                b_input_object_types.insert(place_id_b.clone(), true);
-                            }
-                        }
-                    });
-                let all_reachable = b_input_object_types.values().all(|v| *v);
-
-                if (!all_reachable) {
-                    println!(
-                        "not all reachable for transition {}",
-                        node_transition.unwrap().name
-                    );
-                    println!(
-                        "not all reachable for transition {}",
-                        node_transition.unwrap().name
-                    );
-                    println!(
-                        "not all reachable for transition {}",
-                        node_transition.unwrap().name
-                    );
-                    println!(
-                        "not all reachable for transition {}",
-                        node_transition.unwrap().name
-                    );
-                    println!(
-                        "not all reachable for transition {}",
-                        node_transition.unwrap().name
-                    );
-                    return node_cost;
-                }
-                return 0;
-            })
-            .filter(|cost| cost > &0)
-            .collect();
-        let cost = cost_list.iter().sum();
-        if (cost > 0) {
-            println!("Successfully added {} remaining cost", cost)
-        }
-
-        if (cost_list.len() == open_query_nodes.len()) {
-            // remaining cost
-        }
-        println!("i was called with cost!");
-
-        cost
-    }
-
-    #[inline(never)]
-    fn calculate_min_cost(
-        &self,
-        query_case_stats: &CaseStats,
-        partial_case_stats: &CaseStats,
-        static_cost: f64,
-        marking: &Marking,
-    ) -> f64 {
-        let mut total_cost = 0.0;
-
-        for (event_type, &partial_count) in &partial_case_stats.query_event_counts {
-            let query_count = query_case_stats
-                .query_event_counts
-                .get(event_type)
-                .unwrap_or(&0);
-            total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
-        }
-
-        for (object_type, &partial_count) in &partial_case_stats.query_object_counts {
-            let query_count = query_case_stats
-                .query_object_counts
-                .get(object_type)
-                .unwrap_or(&0);
-            total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
-        }
-
-        /*
-        for (edge_type, &partial_count) in &partial_case_stats.query_edge_counts {
-            let query_count = query_case_stats
-                .query_edge_counts
-                .get(edge_type)
-                .unwrap_or(&0);
-            total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
-        }*/
-
-        let mut more_epsilon_than_void = true;
-
-        for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
-            let partial_count = partial_case_stats
-                .edge_type_counts
-                .get(&(*edge_type, *a, *b))
-                .unwrap_or(&0);
-
-            if (edge_type.eq(&EdgeType::E2O) && *partial_count == 0) {
-                let type_storage = TYPE_STORAGE.read().unwrap();
-                let type_name = type_storage.get_type_name(*a).unwrap();
-                if (self.model_transitions.contains(&type_name.to_string())) {
-                    more_epsilon_than_void = false;
-                    break;
-                } else {
-                    println!("false!!!!!")
-                }
-            } else if (*partial_count < query_count && edge_type.eq(&EdgeType::E2O)) {
-                more_epsilon_than_void = false;
-                break;
+            if(unhit_expected_cost.len()> more_epsilon_cost) {
+                panic!("This should not happen")
             }
+            //TODO make remaining cost as accurate as unhit expected count (2,1)
+            more_epsilon_cost-unhit_expected_cost.len();
         }
 
-        for ((edge_type, a, b), &partial_count) in &partial_case_stats.edge_type_counts {
-            let query_count = query_case_stats
-                .edge_type_counts
-                .get(&(*edge_type, *a, *b))
-                .unwrap_or(&0);
-            total_cost += (partial_count as f64 - *query_count as f64).max(0.0);
-        }
+        let unhit_expected_sum:usize = unhit_expected_cost.iter().map(|unhit_expected| unhit_expected.expected_cost).sum();
 
-        let mut more_epsilon_cost = 0.0;
-        if (more_epsilon_than_void) {
-            marking
-                .assignments
-                .iter()
-                .filter(|(place_id, _)| {
-                    let place = self.model.get_place(place_id).unwrap();
-                    !place.final_place
-                })
-                .for_each(|(place_id, count)| {
-                    let place = self.model.get_place(place_id).unwrap();
-
-                    let final_place = self
-                        .model
-                        .get_final_place_for_type(&place.object_type)
-                        .unwrap();
-
-                    let shortest_path = self
-                        .shortest_path_cache
-                        .shortest_path(&place.id, &final_place.id)
-                        .unwrap()
-                        .distance;
-                    more_epsilon_cost += (shortest_path * count.len()) as f64;
-                });
-            //println!("More_epsilon_cost: {}", more_epsilon_cost)
-        }
-
-        let mut added_void_cost = 0.0;
-        let mut unreachable_events: HashSet<EventType> = HashSet::new();
-        // print a list of edges in query_case_stats where query_count > partial_count
-        for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
-            if (*edge_type == EdgeType::DF) {
-                let partial_count = partial_case_stats
-                    .edge_type_counts
-                    .get(&(*edge_type, *a, *b))
-                    .unwrap_or(&0);
-                let difference: isize = query_count as isize - *partial_count as isize;
-                if (difference > 0) {
-                    let b_type: EventType = b.clone().into();
-
-                    let b_transition = self
-                        .model
-                        .transitions
-                        .values()
-                        .find(|t| t.event_type == b_type);
-                    if (b_transition.is_none()) {
-                        println!(
-                            "Couldnt find transition for event type: {}",
-                            b_type.to_string()
-                        );
-                        added_void_cost += difference as f64;
-                        unreachable_events.insert(b_type);
-                        continue;
-                    }
-                    // get all input places to b and their object types
-                    let b_input_places = b_transition
-                        .unwrap()
-                        .input_arcs
-                        .iter()
-                        .map(|arc| arc.source_place_id)
-                        .collect::<Vec<_>>();
-                    let mut b_input_object_types = b_input_places
-                        .iter()
-                        .map(|place_id| {
-                            (
-                                (place_id.clone()/*,
-                                self.model
-                                    .get_place(place_id)
-                                    .unwrap()
-                                    .oc_object_type
-                                    .clone(),*/),
-                                false,
-                            )
-                        })
-                        .collect::<HashMap<_, _>>();
-
-                    // check b reachable from any place with a token using reachability cache
-
-                    marking
-                        .assignments
-                        .iter()
-                        .filter(|(place_id, tokens)| tokens.len() > 0)
-                        .for_each(|(place_id, tokens)| {
-                            for (place_id_b) in &b_input_places {
-                                if self.reachability_cache.is_reachable(place_id, place_id_b) {
-                                    b_input_object_types.insert(place_id_b.clone(), true);
-                                }
-                            }
-                        });
-                    let all_reachable = b_input_object_types.values().all(|v| *v);
-
-                    if (!all_reachable) {
-                        added_void_cost += difference as f64;
-                        unreachable_events.insert(b_type);
-                    }
-                }
-            }
-        }
-
-        let mut added_void_event_cost = 0.0;
-        if (!unreachable_events.is_empty()) {
-            for ((edge_type, a, b), &query_count) in &query_case_stats.edge_type_counts {
-                if (*edge_type == EdgeType::E2O && unreachable_events.contains(&a.clone().into())) {
-                    let partial_count = partial_case_stats
-                        .edge_type_counts
-                        .get(&(*edge_type, *a, *b))
-                        .unwrap_or(&0);
-                    let difference: isize = query_count as isize - *partial_count as isize;
-                    if (difference > 0) {
-                        added_void_event_cost += difference as f64;
-                    }
-                }
-            }
-        }
-
-        //if (added_void_event_cost > 0.0) {
-        //    println!("Added void cost: {}", added_void_event_cost);
-        //}
-
-        total_cost + static_cost + more_epsilon_cost + added_void_cost + added_void_event_cost
-    }
-
-    fn more_epsilon_than_void_with_debug(&self, marking: &Marking) {
-        let mut more_epsilon_cost = 0.0;
-        marking
-            .assignments
-            .iter()
-            .filter(|(place_id, _)| {
-                let place = self.model.get_place(place_id).unwrap();
-                !place.final_place
-            })
-            .for_each(|(place_id, count)| {
-                let place = self.model.get_place(place_id).unwrap();
-
-                let final_place = self
-                    .model
-                    .get_final_place_for_type(&place.object_type)
-                    .unwrap();
-
-                let shortest_path = self
-                    .shortest_path_cache
-                    .shortest_path(&place.id, &final_place.id)
-                    .unwrap()
-                    .distance;
-
-                if (count.len() > 0) {
-                    println!(
-                        "Adding {} * {} = {} for path between {} {}",
-                        shortest_path,
-                        count.len(),
-                        (shortest_path * count.len()) as f64,
-                        place.name.clone().unwrap_or("".to_string()),
-                        final_place.name.clone().unwrap_or("".to_string())
-                    );
-                }
-                more_epsilon_cost += (shortest_path * count.len()) as f64;
-            });
-        //println!("More_epsilon_cost: {}", more_epsilon_cost)
+        return cost + more_epsilon_cost + unhit_expected_sum;
     }
 
     fn calculate_query_static_costs(
@@ -1689,6 +1400,7 @@ impl ModelCaseChecker {
 
         total_cost + unhittable_edges.len() as f64
     }
+
     #[inline(never)]
     fn filter_firing_combinations(
         &self,
@@ -1959,6 +1671,78 @@ impl ModelCaseChecker {
         })
     }
 
+    fn calculate_min_expected_cost(
+        &self,
+        query_case: &CaseGraph,
+        object_node: &Node,
+        reverse_node_mapping: &HashMap<usize, NodeMapping>,
+        unhit_expected_cost: &mut Vec<UnhitExpectedCost>,
+    ) {
+        fn projected_cost(tf: &bool) -> usize {
+            if (*tf) {
+                // event involves only one object - cost of node + cost of E2O edge
+                return 2;
+            } else {
+                // event involves multiple objects - only cost of E2O edge
+                return 1;
+            }
+        }
+        reverse_node_mapping
+            .get(&object_node.id())
+            .map(|mapping| {
+                let min_events = self
+                    .min_events_per_object
+                    .get(&object_node.oc_type_id().into())
+                    .unwrap();
+                match mapping {
+                    VoidNode(_, _) => min_events.clone(),
+                    RealNode(partial_id, query_id) => {
+                        let object_adjacency = query_case
+                            .adjacency
+                            .get(query_id)
+                            .unwrap()
+                            .iter()
+                            .filter_map(|adj| {
+                                let adj_edge = query_case.edges.get(adj).unwrap();
+                                if (adj_edge.edge_type != EdgeType::E2O) {
+                                    return None;
+                                }
+
+                                let adj_node = if adj_edge.from == *query_id {
+                                    query_case.nodes.get(&adj_edge.to)
+                                } else {
+                                    query_case.nodes.get(&adj_edge.from)
+                                }
+                                .unwrap();
+
+                                Some(adj_node)
+                            })
+                            .collect::<Vec<_>>();
+
+                        min_events
+                            .iter()
+                            .filter(|(ev, _)| {
+                                return !object_adjacency
+                                    .iter()
+                                    .any(|node| node.oc_type_id() == ev.0);
+                            })
+                            .cloned()
+                            .collect::<HashSet<_>>()
+                    }
+                }
+            })
+            .unwrap()
+            .iter()
+            .for_each(|(ev, tf)| {
+                let cost = projected_cost(tf);
+                unhit_expected_cost.push(UnhitExpectedCost {
+                    event_type: ev.clone(),
+                    partial_object_id: object_node.id(),
+                    expected_cost: cost,
+                });
+            });
+    }
+
     #[inline(never)]
     fn generate_children<'a>(
         &mut self,
@@ -2149,9 +1933,14 @@ impl ModelCaseChecker {
                                     .model
                                     .get_transition(&combination.transition_id)
                                     .unwrap();
-                                
-                                if(transition.silent) {
-                                    stack.push((current_final, next_marking, combination, forbidden_firings));
+
+                                if (transition.silent) {
+                                    stack.push((
+                                        current_final,
+                                        next_marking,
+                                        combination,
+                                        forbidden_firings,
+                                    ));
                                 } else {
                                     self.create_child_nodes(
                                         &node,
@@ -2162,8 +1951,6 @@ impl ModelCaseChecker {
                                         transition,
                                     );
                                 }
-                                
-                                
                             });
 
                         if (!prev_final && current_final) {
@@ -2188,6 +1975,7 @@ impl ModelCaseChecker {
                                 &marking,
                                 &node.open_query_nodes,
                                 query_case,
+                                &node.unhit_expected_cost
                             );
 
                             let silent_node = SearchNode::new_with_stats(
@@ -2202,6 +1990,7 @@ impl ModelCaseChecker {
                                 node.open_query_nodes.clone(),
                                 node.reverse_node_mapping.clone(),
                                 node.reverse_edge_mapping.clone(),
+                                node.unhit_expected_cost.clone(),
                                 Some(firing_combinations),
                                 node.epsilon_cost,
                                 node.void_cost,
@@ -2364,27 +2153,13 @@ impl ModelCaseChecker {
                     &new_marking,
                     &new_open_node_list,
                     query_case,
+                    &node.unhit_expected_cost
                 );
 
                 if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
                     println!("Old lb {}", node.min_cost);
                     println!("New lb {}", new_min_cost + min_remaining_cost as f64);
                     println!("share of heuristic {}", min_remaining_cost);
-                    println!(
-                        "Old share of heuristic {}",
-                        node.min_cost - node.static_min_cost
-                    );
-                    let cost_old = self.calculate_unreachable_events_verbose(
-                        &node.marking,
-                        &node.open_query_nodes,
-                        query_case,
-                    );
-                    let cost = self.calculate_unreachable_events_verbose(
-                        &new_marking,
-                        &new_open_node_list,
-                        query_case,
-                    );
-                    println!("Cost {}", cost);
                     panic!("Lower bound decreased wtf1!")
                 }
 
@@ -2404,6 +2179,7 @@ impl ModelCaseChecker {
                     new_open_node_list,
                     new_reverse_node_mapping,
                     new_reverse_edge_mapping,
+                    node.unhit_expected_cost.clone(),
                     None,
                     node.epsilon_cost + void_edge_count as f64,
                     node.void_cost + void_cost as f64,
@@ -2425,9 +2201,24 @@ impl ModelCaseChecker {
                 new_reverse_edge_mapping.insert(edge.id, VoidEdge(edge.id, edge.id));
             });
 
+
+
+            let mut new_unhit_expectecd_cost = node.unhit_expected_cost.clone();
+            collected_edges.iter().for_each(|edge|{
+                if(edge.edge_type == EdgeType::DF) {
+                    return;
+                }
+
+                if let Some(pos) = new_unhit_expectecd_cost.iter().position(|unhit_expected_cost| {
+                    return unhit_expected_cost.partial_object_id == edge.to && unhit_expected_cost.event_type == event_type;
+                }) {
+                    new_unhit_expectecd_cost.swap_remove(pos);
+                }
+            });
+
             let mut new_min_cost = node.static_min_cost + collected_edges.len() as f64 + 1.0;
             let min_remaining_cost =
-                self.calculate_unreachable_events(&new_marking, &node.open_query_nodes, query_case);
+                self.calculate_unreachable_events(&new_marking, &node.open_query_nodes, query_case, &new_unhit_expectecd_cost);
 
             if (node.min_cost > new_min_cost + min_remaining_cost as f64) {
                 println!("Old lb {}", node.min_cost);
@@ -2439,6 +2230,9 @@ impl ModelCaseChecker {
                 );
                 panic!("Lower bound decreased wtf2!")
             }
+
+
+
 
             transition_children.push(SearchNode::new_with_stats(
                 new_marking.clone(),
@@ -2452,6 +2246,7 @@ impl ModelCaseChecker {
                 node.open_query_nodes.clone(),
                 new_reverse_node_mapping,
                 new_reverse_edge_mapping,
+                new_unhit_expectecd_cost,
                 None,
                 node.epsilon_cost + collected_edges.len() as f64 + 1.0,
                 node.void_cost,
@@ -2625,7 +2420,7 @@ mod tests {
                 ModelCaseChecker::new_with_shortest_case(petri_net_arc.clone(), shortest_case);
 
             let case_graph_iter = CaseGraphIterator::new(
-                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/bound",
+                "/Users/erikwrede/dev/uni/ma-py/ocgc-py/ocgc/problemkinder/timeout",
             )
             .unwrap();
             let visualized_dir =
