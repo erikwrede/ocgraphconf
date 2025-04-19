@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use graphviz_rust::cmd::Format;
 use process_mining::oc_align::align_case::CaseAlignment;
-use process_mining::oc_align::align_case_model::ModelCaseChecker;
+use process_mining::oc_align::align_case_model::{ModelCaseChecker, PEAK_ALLOC};
 use process_mining::oc_align::visualization::case_visual::export_c2_with_alignment_image;
 use process_mining::oc_case::dummy_ocel_1_serialization::json_to_case_graph;
 use process_mining::oc_case::serialization::deserialize_case_graph;
@@ -70,6 +70,7 @@ enum Commands {
 struct CaseStats {
     duration_seconds: f64,
     alignment_cost: f64,
+    peak_memory: usize
 }
 
 struct Worker {
@@ -135,7 +136,7 @@ fn run_controller(
         Ok(n) => n.get(),
         Err(_) => 4, // Fallback to 4 if unable to determine
     };
-    let num_workers = 6; // Overriding to 10 as per original code
+    let num_workers = 5; // Overriding to 10 as per original code
     println!("Using {} concurrent workers.", num_workers);
 
     // Iterator over case_graph_files
@@ -380,6 +381,7 @@ fn handle_worker_exit(worker: &Worker, status: std::process::ExitStatus, output_
         let stats = CaseStats {
             duration_seconds: 0.0,
             alignment_cost: f64::INFINITY, // Indicate failure
+            peak_memory: 0, // Placeholder for peak memory
         };
         let stats_json = serde_json::to_string(&stats)?;
         fs::write(&worker.stats_path, stats_json).with_context(|| {
@@ -471,6 +473,7 @@ fn run_worker(
         let stats = CaseStats {
             duration_seconds: duration,
             alignment_cost: cost,
+            peak_memory: PEAK_ALLOC.peak_usage()
         };
         // Write stats to a temporary file (to be renamed by controller)
         let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));
@@ -487,6 +490,7 @@ fn run_worker(
         let stats = CaseStats {
             duration_seconds: duration,
             alignment_cost: f64::INFINITY,
+            peak_memory: PEAK_ALLOC.peak_usage()
         };
         // Write stats to a temporary file
         let temp_stats_path = output_dir.join(format!("{}_temp.json", file_stem));

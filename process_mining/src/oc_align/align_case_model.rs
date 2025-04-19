@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 #[global_allocator]
-static PEAK_ALLOC: PeakAlloc = PeakAlloc;
+pub static PEAK_ALLOC: PeakAlloc = PeakAlloc;
 #[derive(Debug, Clone)]
 pub struct SearchNode {
     marking: Marking,
