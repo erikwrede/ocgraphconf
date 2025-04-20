@@ -569,7 +569,7 @@ impl ModelCaseChecker {
         } else {
             f64::INFINITY
         };
-        let mut global_upper_bound = 0.0;
+        let mut global_upper_bound = f64::INFINITY;
 
         let mut counter = 0;
         let start_time = Instant::now();
