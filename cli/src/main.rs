@@ -441,7 +441,7 @@ fn run_worker(
     )?;
 
     // Run branch_and_bound
-    let result = checker.bnb_v3_bfs(&case_graph, initial_marking.clone());
+    let result = checker.bnb_v3(&case_graph, initial_marking.clone());
     if let Some(result_node) = result {
         println!("Solution found for case {:?}", file_stem);
         // Align and calculate cost
