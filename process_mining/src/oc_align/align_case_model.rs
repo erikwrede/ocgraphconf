@@ -569,6 +569,7 @@ impl ModelCaseChecker {
         } else {
             f64::INFINITY
         };
+        let mut global_upper_bound = 0.0;
 
         let mut counter = 0;
         let start_time = Instant::now();
@@ -606,7 +607,7 @@ impl ModelCaseChecker {
                 if( node.unhit_expected_cost.iter().map(|c| c.expected_cost).sum::<usize>() > 0 ) {
                     panic!("Expected cost should be 0 here")
                 }
-                let alignment = CaseAlignment::align_mip(query_case, &node.partial_case);
+                let alignment = Self::alignment_from_product_node(query_case, &node);
                 let cost = alignment.total_cost().unwrap();
                 if cost < global_upper_bound {
                     global_upper_bound = cost;
@@ -616,45 +617,6 @@ impl ModelCaseChecker {
                     println!("static share: {}", node.min_cost - node.static_min_cost);
                     println!("Epsilon cost: {}", node.epsilon_cost);
                     println!("Void cost: {}", node.void_cost);
-
-                    let void_nodes: HashMap<usize, Node> = node
-                        .reverse_node_mapping
-                        .iter()
-                        .filter_map(|(id, mapping)| {
-                            if let VoidNode(_, _void_id) = mapping {
-                                node.partial_case
-                                    .get_node(*id)
-                                    .cloned()
-                                    .map(|node| (*id, node))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    let void_edges: HashMap<usize, Edge> = node
-                        .reverse_edge_mapping
-                        .iter()
-                        .filter_map(|(id, mapping)| {
-                            if let VoidEdge(_, _void_id) = mapping {
-                                node.partial_case
-                                    .get_edge(*id)
-                                    .cloned()
-                                    .map(|edge| (*id, edge))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    let alignment = CaseAlignment {
-                        c1: &node.partial_case,
-                        c2: query_case,
-                        void_nodes,
-                        void_edges,
-                        edge_mapping: node.reverse_edge_mapping.clone(),
-                        node_mapping: node.reverse_node_mapping.clone(),
-                    };
 
                     if alignment.total_cost().unwrap() < node.min_cost {
                         println!("New best bound found: {}", cost);
@@ -673,7 +635,18 @@ impl ModelCaseChecker {
             // Generate and sort children by increasing min_cost.
             let mut children =
                 self.generate_children(&node, &query_case_stats, query_case, static_cost);
-            children.sort_by(|a, b| a.min_cost.partial_cmp(&b.min_cost).unwrap());
+            children.sort_by(|a, b| {
+                let cost_cmp = a.min_cost.partial_cmp(&b.min_cost).unwrap();
+                if cost_cmp == Ordering::Equal {
+                    match (a.marking.is_final_has_tokens(), b.marking.is_final_has_tokens()) {
+                        (true, false) => Ordering::Less,   // Accepting node comes first
+                        (false, true) => Ordering::Greater,
+                        _ => Ordering::Equal,
+                    }
+                } else {
+                    cost_cmp
+                }
+            });
             // Push children in reverse order so that the child with the smallest min_cost is processed first.
             for child in children.into_iter().rev() {
                 if child.min_cost < global_upper_bound {
