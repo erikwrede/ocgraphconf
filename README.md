@@ -7,7 +7,7 @@ This repository is a mono-repo based on a fork of rust4pm by @aarkue and will be
 The three variants of the algorithm (VI OCPN, VI OCPT and VII OCPN) reside in the branches 
 - VI OCPN: variants/VI_OCPN
 - VI OCPT:  variants/VI_OCPT
-- VII OCPN:  variants/V2OCPN
+- VII OCPN:  variants/VII_OCPN
 
 
 # Install guide
